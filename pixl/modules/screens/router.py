@@ -11,7 +11,8 @@ from pixl.modules.screens.schemas import (
     DeviceEnrollChallengeRequest, DeviceEnrollChallengeResponse,
     AgencyScreenClaimRequest, AgencyScreenClaimResponse,
     DeviceEnrollExchangeRequest, DeviceEnrollExchangeResponse,
-    ScreenHeartbeatRequest, ScreenHeartbeatResponse
+    ScreenHeartbeatRequest, ScreenHeartbeatResponse,
+    AdminPlayAdRequest, AdminPlayAdResponse, ScreenPlaybackStatusResponse
 )
 from pixl.modules.screens.service import ScreenService
 from pixl.modules.screens.models import Screen
@@ -48,6 +49,52 @@ async def master_list_screens_endpoint(
     """Master views global fleet across all agencies."""
     result = await db.execute(select(Screen).order_by(Screen.created_at.desc()))
     return [ScreenResponse.model_validate(s) for s in result.scalars().all()]
+
+
+@master_screens_router.post("/{screen_id}/play-ad", response_model=AdminPlayAdResponse)
+async def master_play_ad_endpoint(
+    screen_id: str,
+    req: AdminPlayAdRequest,
+    db: AsyncSession = Depends(get_db_session),
+    session: dict = Depends(require_role(["master_admin"], expected_audience="pixl:audience:master"))
+):
+    """Master admin immediately broadcasts and plays an ad campaign on any screen."""
+    media_ids = list(req.media_ids)
+    if req.media_id and req.media_id not in media_ids:
+        media_ids.append(req.media_id)
+
+    result = await ScreenService.play_ad_on_screen(
+        db=db,
+        screen_id=screen_id,
+        organization_id=None,
+        media_ids=media_ids,
+        duration_seconds=req.duration_seconds,
+        name=req.name,
+        priority=req.priority,
+        duration_hours=req.duration_hours
+    )
+    return AdminPlayAdResponse(**result)
+
+
+@master_screens_router.get("/{screen_id}/playback", response_model=ScreenPlaybackStatusResponse)
+async def master_screen_playback_status(
+    screen_id: str,
+    db: AsyncSession = Depends(get_db_session),
+    session: dict = Depends(require_role(["master_admin"], expected_audience="pixl:audience:master"))
+):
+    """Master views live playback state and currently running ad for any screen."""
+    result = await ScreenService.get_current_playback(db=db, screen_id=screen_id, organization_id=None)
+    return ScreenPlaybackStatusResponse(**result)
+
+
+@master_screens_router.post("/{screen_id}/stop-ad")
+async def master_stop_ad_endpoint(
+    screen_id: str,
+    db: AsyncSession = Depends(get_db_session),
+    session: dict = Depends(require_role(["master_admin"], expected_audience="pixl:audience:master"))
+):
+    """Master admin stops active ad on screen."""
+    return await ScreenService.stop_ad_on_screen(db=db, screen_id=screen_id, organization_id=None)
 
 
 # Agency endpoints
@@ -101,6 +148,56 @@ async def agency_claim_screen_endpoint(
         organization_id=org_id,
         message=f"Screen '{screen.name}' paired successfully"
     )
+
+
+@agency_screens_router.post("/{screen_id}/play-ad", response_model=AdminPlayAdResponse)
+async def agency_play_ad_endpoint(
+    screen_id: str,
+    req: AdminPlayAdRequest,
+    db: AsyncSession = Depends(get_db_session),
+    org_id: str = Depends(require_tenant_context),
+    session: dict = Depends(require_role(["agency_admin", "agency_operator"], expected_audience="pixl:audience:agency"))
+):
+    """Agency admin immediately broadcasts and plays an ad campaign on an assigned screen."""
+    media_ids = list(req.media_ids)
+    if req.media_id and req.media_id not in media_ids:
+        media_ids.append(req.media_id)
+
+    result = await ScreenService.play_ad_on_screen(
+        db=db,
+        screen_id=screen_id,
+        organization_id=org_id,
+        media_ids=media_ids,
+        duration_seconds=req.duration_seconds,
+        name=req.name,
+        priority=req.priority,
+        duration_hours=req.duration_hours
+    )
+    return AdminPlayAdResponse(**result)
+
+
+@agency_screens_router.get("/{screen_id}/playback", response_model=ScreenPlaybackStatusResponse)
+async def agency_screen_playback_status(
+    screen_id: str,
+    db: AsyncSession = Depends(get_db_session),
+    org_id: str = Depends(require_tenant_context),
+    session: dict = Depends(require_role(["agency_admin", "agency_operator"], expected_audience="pixl:audience:agency"))
+):
+    """Agency views live playback state and currently running ad for an owned screen."""
+    result = await ScreenService.get_current_playback(db=db, screen_id=screen_id, organization_id=org_id)
+    return ScreenPlaybackStatusResponse(**result)
+
+
+@agency_screens_router.post("/{screen_id}/stop-ad")
+async def agency_stop_ad_endpoint(
+    screen_id: str,
+    db: AsyncSession = Depends(get_db_session),
+    org_id: str = Depends(require_tenant_context),
+    session: dict = Depends(require_role(["agency_admin"], expected_audience="pixl:audience:agency"))
+):
+    """Agency admin stops active ad on owned screen."""
+    return await ScreenService.stop_ad_on_screen(db=db, screen_id=screen_id, organization_id=org_id)
+
 
 
 # Device Hardware endpoints

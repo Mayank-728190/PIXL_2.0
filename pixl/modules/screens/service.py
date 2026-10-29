@@ -1,10 +1,14 @@
 from datetime import datetime, timezone, timedelta
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Dict, Any
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func
+from sqlalchemy.orm import selectinload
 
 from pixl.modules.screens.models import Screen, EnrollmentChallenge, DeviceCredential, DeviceCursor
 from pixl.modules.organizations.models import Organization
+from pixl.modules.campaigns.models import Campaign, ScreenAssignment
+from pixl.modules.playlists.models import Playlist, PlaylistItem
+from pixl.modules.media.models import MediaAsset
 from pixl.core.database import ensure_utc
 from pixl.core.security import generate_pin, generate_secure_token, get_server_signing_keys
 from pixl.core.exceptions import ConflictError, NotFoundError, ForbiddenError
@@ -207,3 +211,251 @@ class ScreenService:
 
         await db.commit()
         return now, screen.current_manifest_version, action
+
+    @staticmethod
+    async def play_ad_on_screen(
+        db: AsyncSession,
+        screen_id: str,
+        organization_id: Optional[str],
+        media_ids: List[str],
+        duration_seconds: int = 10,
+        name: Optional[str] = "Live Ad Broadcast",
+        priority: int = 200,
+        duration_hours: int = 24
+    ) -> Dict[str, Any]:
+        """
+        Allows an admin to instantly trigger and publish an ad (or set of ads) to a screen.
+        High priority (default 200) preempts standard background playlists (priority 100).
+        """
+        query = select(Screen)
+        if screen_id.isdigit():
+            query = query.where(Screen.screen_number == int(screen_id))
+        else:
+            query = query.where(Screen.id == screen_id)
+
+        if organization_id:
+            query = query.where(Screen.organization_id == organization_id)
+
+        res = await db.execute(query)
+        screen = res.scalar_one_or_none()
+        if not screen:
+            raise NotFoundError("Screen not found or not accessible within your organization")
+
+        import random
+        if screen.screen_number is None:
+            screen.screen_number = (int(datetime.now(timezone.utc).timestamp() * 1000) % 100000000) * 10 + random.randint(1, 9)
+
+        if not media_ids:
+            raise ConflictError("At least one media_id must be provided to play an ad")
+
+        # Fetch and validate all media assets
+        media_assets = []
+        for mid in media_ids:
+            m_query = select(MediaAsset)
+            if str(mid).isdigit():
+                m_query = m_query.where(MediaAsset.media_number == int(mid))
+            else:
+                m_query = m_query.where(MediaAsset.id == str(mid))
+
+            if organization_id:
+                m_query = m_query.where(MediaAsset.organization_id == organization_id)
+
+            m_res = await db.execute(m_query)
+            m_asset = m_res.scalar_one_or_none()
+            if not m_asset:
+                raise NotFoundError(f"Media asset '{mid}' not found or not accessible")
+            media_assets.append(m_asset)
+
+        # 1. Create a dedicated playlist for this ad broadcast
+        p_num = (int(datetime.now(timezone.utc).timestamp() * 1000) % 100000000) * 10 + random.randint(1, 9)
+        playlist = Playlist(
+            playlist_number=p_num,
+            organization_id=screen.organization_id or organization_id,
+            name=f"Ad: {name or 'Broadcast'}",
+            is_reusable=False
+        )
+        db.add(playlist)
+        await db.flush()
+
+        # Add media items to playlist
+        for idx, m_asset in enumerate(media_assets):
+            p_item = PlaylistItem(
+                playlist_id=playlist.id,
+                media_id=m_asset.id,
+                sort_order=idx,
+                duration_mode="CUSTOM_DURATION",
+                configured_duration_ms=max(1, duration_seconds) * 1000
+            )
+            db.add(p_item)
+        await db.flush()
+
+        # 2. Create the ad campaign
+        now = datetime.now(timezone.utc)
+        c_num = (int(datetime.now(timezone.utc).timestamp() * 1000) % 100000000) * 10 + random.randint(1, 9)
+        campaign = Campaign(
+            campaign_number=c_num,
+            organization_id=screen.organization_id or organization_id,
+            name=name or "Live Ad Broadcast",
+            playlist_id=playlist.id,
+            priority=priority,
+            status="PUBLISHED",
+            start_time=now,
+            end_time=now + timedelta(hours=duration_hours),
+            current_version=1
+        )
+        db.add(campaign)
+        await db.flush()
+
+        # 3. Assign campaign to screen
+        assignment = ScreenAssignment(
+            campaign_id=campaign.id,
+            screen_id=screen.id
+        )
+        db.add(assignment)
+
+        # 4. Invalidate screen manifest version so player downloads the new ad
+        screen.current_manifest_version += 1
+        await db.commit()
+
+        return {
+            "screen_id": screen.id,
+            "screen_number": screen.screen_number,
+            "campaign_id": campaign.id,
+            "campaign_name": campaign.name,
+            "priority": campaign.priority,
+            "status": "PLAYING",
+            "manifest_version": screen.current_manifest_version,
+            "media_count": len(media_assets),
+            "media_items": [
+                {
+                    "id": m.media_number or 5000,
+                    "uuid": m.id,
+                    "filename": m.filename,
+                    "type": "video" if "video" in (m.mime_type or "") else "image"
+                }
+                for m in media_assets
+            ],
+            "message": "Ad broadcast published. Screen will display the ad on its next sync cycle."
+        }
+
+    @staticmethod
+    async def get_current_playback(
+        db: AsyncSession,
+        screen_id: str,
+        organization_id: Optional[str]
+    ) -> Dict[str, Any]:
+        """Returns the current playback state and active campaign for a screen."""
+        query = select(Screen)
+        if screen_id.isdigit():
+            query = query.where(Screen.screen_number == int(screen_id))
+        else:
+            query = query.where(Screen.id == screen_id)
+
+        if organization_id:
+            query = query.where(Screen.organization_id == organization_id)
+
+        res = await db.execute(query)
+        screen = res.scalar_one_or_none()
+        if not screen:
+            raise NotFoundError("Screen not found or not accessible within your organization")
+
+        now = datetime.now(timezone.utc)
+        is_online = False
+        if screen.last_heartbeat_at and (now - ensure_utc(screen.last_heartbeat_at)).total_seconds() <= 180:
+            is_online = True
+        elif screen.last_sync_at and (now - ensure_utc(screen.last_sync_at)).total_seconds() <= 180:
+            is_online = True
+
+        # Find active published campaign
+        camp_res = await db.execute(
+            select(Campaign)
+            .join(ScreenAssignment, ScreenAssignment.campaign_id == Campaign.id)
+            .where(
+                ScreenAssignment.screen_id == screen.id,
+                Campaign.status == "PUBLISHED",
+                Campaign.end_time > now
+            )
+            .order_by(Campaign.priority.desc())
+        )
+        campaign = camp_res.scalars().first()
+
+        campaign_info = None
+        if campaign and campaign.playlist_id:
+            pl_res = await db.execute(
+                select(Playlist)
+                .where(Playlist.id == campaign.playlist_id)
+                .options(selectinload(Playlist.items).selectinload(PlaylistItem.media))
+            )
+            pl = pl_res.scalar_one_or_none()
+            if pl:
+                campaign_info = {
+                    "campaign_id": campaign.id,
+                    "campaign_number": campaign.campaign_number,
+                    "name": campaign.name,
+                    "priority": campaign.priority,
+                    "start_time": campaign.start_time,
+                    "end_time": campaign.end_time,
+                    "playlist_name": pl.name,
+                    "media_items": [
+                        {
+                            "media_id": item.media.media_number if item.media else None,
+                            "filename": item.media.filename if item.media else "unknown",
+                            "type": "video" if item.media and "video" in (item.media.mime_type or "") else "image",
+                            "duration_seconds": item.configured_duration_ms // 1000
+                        }
+                        for item in pl.items
+                    ]
+                }
+
+        return {
+            "screen_id": screen.id,
+            "screen_number": screen.screen_number,
+            "screen_name": screen.name,
+            "status": screen.status,
+            "is_online": is_online,
+            "manifest_version": screen.current_manifest_version,
+            "last_sync_at": screen.last_sync_at,
+            "current_campaign": campaign_info
+        }
+
+    @staticmethod
+    async def stop_ad_on_screen(
+        db: AsyncSession,
+        screen_id: str,
+        organization_id: Optional[str]
+    ) -> Dict[str, Any]:
+        """Stops the current high-priority ad campaign on a screen, reverting to standard content."""
+        query = select(Screen)
+        if screen_id.isdigit():
+            query = query.where(Screen.screen_number == int(screen_id))
+        else:
+            query = query.where(Screen.id == screen_id)
+
+        if organization_id:
+            query = query.where(Screen.organization_id == organization_id)
+
+        res = await db.execute(query)
+        screen = res.scalar_one_or_none()
+        if not screen:
+            raise NotFoundError("Screen not found")
+
+        now = datetime.now(timezone.utc)
+        camp_res = await db.execute(
+            select(Campaign)
+            .join(ScreenAssignment, ScreenAssignment.campaign_id == Campaign.id)
+            .where(
+                ScreenAssignment.screen_id == screen.id,
+                Campaign.status == "PUBLISHED",
+                Campaign.end_time > now
+            )
+            .order_by(Campaign.priority.desc())
+        )
+        campaign = camp_res.scalars().first()
+        if campaign:
+            campaign.status = "EXPIRED"
+            screen.current_manifest_version += 1
+            await db.commit()
+            return {"status": "STOPPED", "campaign_id": campaign.id, "message": "Ad playback stopped."}
+
+        return {"status": "NO_ACTIVE_AD", "message": "No active ad was scheduled."}
+

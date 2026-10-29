@@ -108,3 +108,4 @@ async def serve_media_file(file_path: str):
 
     # Fallback response for video requests
     return Response(content=b"", media_type="video/mp4")
+

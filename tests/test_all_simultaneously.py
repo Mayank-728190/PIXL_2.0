@@ -136,6 +136,25 @@ async def test_full_platform_concurrent_simulation(client: AsyncClient, master_a
         m_data = manifest_resp.json()
         assert verify_manifest_signature(m_data["payload"], m_data["signature"], server_pubkey) is True
 
+        # Agency Admin tests instant ad trigger to play a new ad on the screen
+        play_ad_res = await client.post(
+            f"/api/v1/agency/screens/{screen_id}/play-ad",
+            headers=agency_headers,
+            json={
+                "media_id": media["id"],
+                "duration_seconds": 12,
+                "name": f"Flash Ad Broadcast {idx}",
+                "priority": 250
+            }
+        )
+        assert play_ad_res.status_code == 200
+        assert play_ad_res.json()["status"] == "PLAYING"
+
+        # Check live playback status
+        playback_check = await client.get(f"/api/v1/agency/screens/{screen_id}/playback", headers=agency_headers)
+        assert playback_check.status_code == 200
+        assert playback_check.json()["current_campaign"]["name"] == f"Flash Ad Broadcast {idx}"
+
         # Device uploads PoP batch
         pop_resp = await client.post(
             "/api/v1/device/playback/batch",
@@ -166,3 +185,10 @@ async def test_full_platform_concurrent_simulation(client: AsyncClient, master_a
 
     # Run workflows simultaneously
     await asyncio.gather(*(workflow_per_agency(screen_setups[i], i + 1) for i in range(3)))
+
+    # Verify Browser Screen Simulator page renders with Kiosk disclaimer
+    sim_resp = await client.get("/simulator")
+    assert sim_resp.status_code == 200
+    assert "PIXL 2.0 Screen Simulator" in sim_resp.text
+    assert "not equivalent to Android Kiosk" in sim_resp.text
+

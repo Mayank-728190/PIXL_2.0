@@ -32,6 +32,7 @@ from pixl.modules.campaigns.router import (
 )
 from pixl.modules.ingestion.router import router as ingestion_router
 from pixl.modules.tv.router import tv_router, media_file_router
+from pixl.modules.simulator.router import simulator_router
 
 
 @asynccontextmanager
@@ -109,4 +110,5 @@ app.include_router(device_manifest_router)
 app.include_router(ingestion_router)
 app.include_router(tv_router)
 app.include_router(media_file_router)
+app.include_router(simulator_router)
 

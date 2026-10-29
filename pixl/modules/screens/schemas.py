@@ -86,3 +86,37 @@ class ScreenResponse(BaseModel):
     class Config:
         from_attributes = True
 
+
+class AdminPlayAdRequest(BaseModel):
+    media_ids: list[str] = Field(default_factory=list, description="List of media asset UUIDs or integer numbers")
+    media_id: Optional[str] = Field(None, description="Single media asset UUID or integer number")
+    duration_seconds: int = Field(default=10, ge=1, le=86400, description="Duration per ad item in seconds")
+    name: Optional[str] = Field(default="Live Ad Broadcast", max_length=255)
+    priority: int = Field(default=200, ge=1, le=1000, description="Priority: 100=Standard, 200=High Ad Takeover, 300=Emergency")
+    duration_hours: int = Field(default=24, ge=1, le=8760, description="How many hours this ad campaign remains active")
+
+
+class AdminPlayAdResponse(BaseModel):
+    screen_id: str
+    screen_number: Optional[int] = None
+    campaign_id: str
+    campaign_name: str
+    priority: int
+    status: str = "PLAYING"
+    manifest_version: int
+    media_count: int
+    media_items: list[dict]
+    message: str = "Ad broadcast published. Screen will display the ad on its next sync cycle."
+
+
+class ScreenPlaybackStatusResponse(BaseModel):
+    screen_id: str
+    screen_number: Optional[int] = None
+    screen_name: str
+    status: str
+    is_online: bool
+    manifest_version: int
+    last_sync_at: Optional[datetime]
+    current_campaign: Optional[dict] = None
+
+
