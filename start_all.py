@@ -25,6 +25,28 @@ ENV_FILE = ROOT_DIR / ".env"
 ENV_EXAMPLE = ROOT_DIR / ".env.example"
 
 
+def find_python_executable() -> Path:
+    """Finds the virtualenv python interpreter or falls back to sys.executable."""
+    if os.name == "nt":
+        venv_py = ROOT_DIR / ".venv" / "Scripts" / "python.exe"
+    else:
+        venv_py = ROOT_DIR / ".venv" / "bin" / "python"
+
+    if venv_py.exists():
+        return venv_py
+    return Path(sys.executable)
+
+
+# Automatic venv delegation: if run with global python, re-exec under .venv
+TARGET_PYTHON = find_python_executable()
+if TARGET_PYTHON.exists() and Path(sys.executable).resolve() != TARGET_PYTHON.resolve():
+    try:
+        res = subprocess.call([str(TARGET_PYTHON)] + sys.argv)
+        sys.exit(res)
+    except Exception as _e:
+        pass
+
+
 def print_banner(text: str):
     print(f"\n\033[1;36m{'=' * 72}\033[0m")
     print(f"\033[1;36m  {text}\033[0m")
@@ -126,7 +148,7 @@ def main():
         log("Celery", f"Redis detected at {redis_url}. Launching background worker...", "\033[1;34m")
         celery_pool = ["-P", "solo"] if sys.platform.startswith("win") else []
         celery_cmd = [
-            sys.executable, "-m", "celery",
+            str(TARGET_PYTHON), "-m", "celery",
             "-A", "pixl.workers.celery_app",
             "worker",
             "--loglevel=INFO"
@@ -139,7 +161,7 @@ def main():
     # 2. Launch FastAPI API Server
     log("FastAPI", f"Launching Uvicorn server on http://{host}:{port}...", "\033[1;34m")
     uvicorn_cmd = [
-        sys.executable, "-m", "uvicorn",
+        str(TARGET_PYTHON), "-m", "uvicorn",
         "pixl.main:app",
         "--host", host,
         "--port", str(port),
@@ -186,3 +208,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
