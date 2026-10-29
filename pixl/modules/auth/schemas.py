@@ -5,13 +5,13 @@ from pydantic import BaseModel, EmailStr, Field
 
 class LoginRequest(BaseModel):
     email: EmailStr
-    password: str = Field(..., min_length=8)
-    totp_code: Optional[str] = Field(None, description="Required for accounts with MFA enabled (e.g. Master)")
+    password: str = Field(..., min_length=8, max_length=1024)
+    totp_code: Optional[str] = Field(None, max_length=6, description="Required for accounts with MFA enabled (e.g. Master)")
 
 
 class InvitationAcceptRequest(BaseModel):
-    invitation_token: str
-    password: str = Field(..., min_length=8)
+    invitation_token: str = Field(..., min_length=1, max_length=256)
+    password: str = Field(..., min_length=12, max_length=128)
     totp_code: Optional[str] = None
 
 

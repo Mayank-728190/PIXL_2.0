@@ -20,11 +20,17 @@ from sqlalchemy.pool import NullPool
 
 _test_directory = tempfile.TemporaryDirectory(prefix="pixl-tests-")
 TEST_DB_FILE = (Path(_test_directory.name) / "test_pixl.db").as_posix()
-TEST_DATABASE_URL = f"sqlite+aiosqlite:///{TEST_DB_FILE}"
+TEST_DATABASE_URL = os.environ.get("PIXL_TEST_DATABASE_URL", f"sqlite+aiosqlite:///{TEST_DB_FILE}")
+from sqlalchemy.engine import make_url
+_test_url = make_url(TEST_DATABASE_URL)
+if not TEST_DATABASE_URL.startswith("sqlite") and not (_test_url.database or "").endswith("_test"):
+    raise RuntimeError("Destructive database tests require a dedicated database name ending in _test")
+_test_sqlite = TEST_DATABASE_URL.startswith("sqlite")
 
 test_engine = create_async_engine(
     TEST_DATABASE_URL,
-    connect_args={"check_same_thread": False},
+    connect_args={"check_same_thread": False} if _test_sqlite else {},
+    hide_parameters=True,
     pool_pre_ping=True,
     poolclass=NullPool,
 )
@@ -42,17 +48,22 @@ TestingSessionLocal = async_sessionmaker(
 async def setup_test_db(tmp_path, monkeypatch):
     from pixl.core.config import settings
     monkeypatch.setattr(settings, "LOCAL_STORAGE_PATH", str(tmp_path / "storage"))
+    monkeypatch.setattr(settings, "SESSION_BACKEND", "memory")
+    monkeypatch.setattr(settings, "ENVIRONMENT", "development")
+    from pixl.core.session import _session_store
+    _session_store.clear()
     monkeypatch.setattr(settings, "ALLOW_LEGACY_TV", True)
     from pixl.core.rate_limit import _attempts
     _attempts.clear()
     async with test_engine.begin() as conn:
-        await conn.execute(text("PRAGMA journal_mode=WAL;"))
+        if _test_sqlite:
+            await conn.execute(text("PRAGMA journal_mode=WAL;"))
         await conn.run_sync(Base.metadata.create_all)
     yield
     async with test_engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
     await test_engine.dispose()
-    if os.path.exists(TEST_DB_FILE):
+    if _test_sqlite and os.path.exists(TEST_DB_FILE):
         try:
             os.remove(TEST_DB_FILE)
         except Exception:

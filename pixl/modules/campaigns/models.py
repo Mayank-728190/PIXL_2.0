@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from typing import Optional, List
-from sqlalchemy import String, Integer, DateTime, ForeignKey, Text
+from sqlalchemy import String, Integer, DateTime, ForeignKey, Text, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from pixl.core.database import Base, UUIDPrimaryKeyMixin, TimestampMixin
@@ -8,6 +8,7 @@ from pixl.core.database import Base, UUIDPrimaryKeyMixin, TimestampMixin
 
 class Campaign(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "campaigns"
+    __table_args__ = (Index("ix_campaigns_expiry", "status", "end_time"),)
 
     campaign_number: Mapped[Optional[int]] = mapped_column(Integer, unique=True, index=True, nullable=True)
     organization_id: Mapped[str] = mapped_column(

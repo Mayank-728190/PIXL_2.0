@@ -5,7 +5,8 @@ and enrollment, real local media uploads, playlists, scheduled campaigns, signed
 manifests and ordered playback receipts.
 
 **This is a working core workflow, not a completed production product.** See
-[delivery status](docs/DELIVERY_STATUS.md) for evidence and remaining requirements.
+[delivery status](docs/DELIVERY_STATUS.md) for evidence and remaining requirements,
+and [production hardening](docs/PRODUCTION_HARDENING.md) for jobs, deployment and release gates.
 
 ## Run locally
 
@@ -27,7 +28,10 @@ random TOTP secret (32+ base32 characters) already stored in your authenticator
 or password manager. It does not print credentials or overwrite existing users.
 For controlled automation it accepts `MASTER_BOOTSTRAP_EMAIL`,
 `MASTER_BOOTSTRAP_PASSWORD` and `MASTER_BOOTSTRAP_TOTP_SECRET` environment variables.
-Remove those bootstrap variables after creating the account.
+Remove those bootstrap variables after creating the account. The launcher never
+creates default accounts or silently migrates a database. Old demo accounts are
+not automatically removed: audit/remove them and rotate any historically exposed
+credentials before deployment.
 
 - Master: **http://localhost:8000/master**
 - Agency: **http://localhost:8000/agency**
@@ -50,7 +54,13 @@ separate-domain routing/TLS must still be configured and verified in deployment.
 4. Agency uploads multiple files from the library. Upload bytes, validation and
    publication are separate states; concurrency is bounded to two browser uploads.
 5. Select READY media, configure durations, choose assigned screens and schedule,
-   then create/publish a campaign from the same page. Fleet data polls every 5s.
+   then create/publish a campaign from the same page. Fleet data refreshes automatically
+   with request jitter and failure backoff. The overview includes live fleet graphs.
+6. Master can invite additional agency admins and revoke their access from
+   **Agencies & access → Admin accounts**. Business and audit records are retained.
+
+See [dashboard upgrade notes](docs/DASHBOARD_UPGRADE.md) for the design, graph semantics,
+account lifecycle, device polling hints and verification scope.
 
 The portal does not implement advertiser purchasing, split layouts or full draft
 editing yet. Browser playback is not Android kiosk enforcement.
@@ -59,15 +69,21 @@ editing yet. Browser playback is not Android kiosk enforcement.
 
 1. `POST /api/v1/agency/media/upload-ticket` with filename, MIME and exact byte size.
 2. `PUT` raw file bytes to `presigned_upload_url` before its expiry.
-3. `POST /api/v1/agency/media/finalize` with `ticket_id` and optional SHA-256.
+3. `POST /api/v1/agency/media/process` with `ticket_id` and optional SHA-256.
+4. Poll `GET /api/v1/agency/media/uploads/{ticket_id}` until FINALIZED or FAILED.
+   Repeating the processing request safely returns the same job/result.
 
 Finalization verifies real content, dimensions, duration, checksum and quota,
 generates a thumbnail, then publishes. Local storage is supported; unimplemented
 providers such as R2 fail explicitly instead of returning fake URLs. Media files
 require expiring signed download URLs; quarantine is never served. Configure
 `MEDIA_PUBLIC_BASE_URL` to the HTTPS API origin for devices on other hosts.
-Processing is synchronous from the caller's perspective, with blocking inspection
-offloaded from the event loop. FFmpeg is a required runtime dependency for videos.
+With `MEDIA_PROCESSING_MODE=worker`, processing uses durable database jobs, Celery
+workers and a single Beat scheduler, with leases, bounded retries and recovery.
+Local `inline` mode requires no broker and offloads inspection from the event loop.
+The older synchronous `/finalize` endpoint remains available only in inline mode.
+FFmpeg is required for video processing. Failed/expired uploads keep their quota
+reservation until scheduled cleanup confirms deletion.
 
 ## Legacy demo player
 
@@ -89,7 +105,13 @@ python -m compileall -q pixl scripts start_all.py
 pip install -e ".[browser]"
 python -m scripts.check_portals_browser
 # For Edge instead of Chrome: set PIXL_BROWSER_CHANNEL=msedge
+# Full isolated production-mode Docker/PostgreSQL/Redis/HTTPS verification:
+python -m scripts.check_docker
 ```
+
+The Docker checker builds and tears down its own stack without reading your `.env`
+or using existing databases. See [Docker verification results](docs/DOCKER_VERIFICATION.md)
+for the passing checks and remaining acceptance limits.
 
 ## Deployment and migrations
 
@@ -99,11 +121,15 @@ previously created directly from metadata may already contain migration columns
 without an Alembic history: inspect it before upgrading or stamping. Existing
 user databases and credentials are not automatically rewritten by these changes.
 
-Production requires Redis sessions, a strong random `SECRET_KEY`, persistent
-Ed25519 signing keys, correct portal origins, TLS and a URL-safe randomly generated
-`POSTGRES_PASSWORD`. Compose keeps PostgreSQL/Redis internal, persists media and
-binds the API to loopback for a TLS reverse proxy. Its configuration validates,
-but container startup/PostgreSQL/real Redis operation still need live verification.
+Production requires DEBUG disabled, PostgreSQL, Redis sessions, worker processing,
+a strong random `SECRET_KEY`, persistent Ed25519 signing keys, valid HTTPS portal/media
+origins, TLS and a URL-safe randomly generated `POSTGRES_PASSWORD`. Compose includes
+API/worker/Beat services, keeps PostgreSQL/Redis internal, persists media and binds
+the API to loopback for a TLS reverse proxy. Docker uses hash-locked Linux/Python
+3.12 dependencies from `requirements.lock`. The isolated production-mode Docker
+stack passed real PostgreSQL/Redis, HTTPS browser, worker crash/outage and backup/
+restore checks. Validate your actual domains, certificates, proxy, workload and
+recovery procedures separately; this is not full production acceptance.
 Do not enable query-string access logging: invitation and media URLs contain
 bearer capabilities. The supplied Uvicorn launch commands disable access logging;
 configure your reverse proxy to omit or redact query strings as well.

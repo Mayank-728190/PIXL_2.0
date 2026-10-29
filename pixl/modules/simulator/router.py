@@ -1,16 +1,23 @@
-from fastapi import APIRouter, Request, Depends
+from fastapi import APIRouter, Request, Depends, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from datetime import datetime, timezone, timedelta
 
 from pixl.core.database import get_db_session
+from pixl.core.config import settings
 from pixl.modules.screens.models import Screen
 from pixl.modules.media.models import MediaAsset
 from pixl.modules.playlists.models import Playlist, PlaylistItem
 from pixl.modules.campaigns.models import Campaign, ScreenAssignment
 
-simulator_router = APIRouter(tags=["Simulator: Browser Screen Player"])
+def require_simulator_enabled():
+    if settings.ENVIRONMENT == "production" or not settings.ALLOW_LEGACY_TV:
+        raise HTTPException(404, "Browser simulator is not available")
+
+
+simulator_router = APIRouter(tags=["Simulator: Browser Screen Player"],
+                             dependencies=[Depends(require_simulator_enabled)])
 
 
 SIMULATOR_HTML = """<!DOCTYPE html>

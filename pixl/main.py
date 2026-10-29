@@ -1,10 +1,13 @@
 from contextlib import asynccontextmanager
+import logging
+import uuid
 from fastapi import Depends, FastAPI, Request
 from sqlalchemy import text
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
 
 from pixl.core.config import settings
 from pixl.core.database import engine, Base, get_db_session
@@ -43,10 +46,7 @@ from pixl.portals.router import router as portal_router
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if settings.ENVIRONMENT == "production":
-        if settings.SESSION_BACKEND != "redis":
-            raise RuntimeError("Production requires SESSION_BACKEND=redis")
-        if settings.SECRET_KEY.startswith(("pixl_default_", "pixl_dev_")) or len(settings.SECRET_KEY) < 32:
-            raise RuntimeError("Production requires a strong SECRET_KEY")
+        settings.validate_production()
         from pixl.core.security import get_server_signing_keys
         get_server_signing_keys()
     else:
@@ -65,6 +65,7 @@ app = FastAPI(
     lifespan=lifespan,
     docs_url="/api/docs" if settings.DEBUG else None,
     redoc_url="/api/redoc" if settings.DEBUG else None,
+    openapi_url="/api/openapi.json" if settings.DEBUG else None,
 )
 
 # CORS Middleware (Strict explicit origins, never wildcard * with credentials)
@@ -75,6 +76,64 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def response_safety_headers(request: Request, call_next):
+    request.state.request_id = uuid.uuid4().hex
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = request.state.request_id
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    if request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store"
+    if settings.ENVIRONMENT == "production":
+        response.headers["Strict-Transport-Security"] = "max-age=31536000"
+    return response
+
+
+@app.exception_handler(RequestValidationError)
+async def safe_validation_errors(request: Request, exc: RequestValidationError):
+    # Never echo submitted passwords, invitation capabilities or other inputs.
+    return JSONResponse(status_code=422, content={"detail": [
+        {"loc": list(error["loc"]), "msg": error["msg"], "type": error["type"]}
+        for error in exc.errors()
+    ]})
+
+
+@app.exception_handler(SQLAlchemyError)
+async def database_error_handler(request: Request, exc: SQLAlchemyError):
+    logging.getLogger(__name__).error("Database failure type=%s request_id=%s",
+                                     type(exc).__name__, request.state.request_id)
+    if isinstance(exc, IntegrityError):
+        return JSONResponse(status_code=409, content={
+            "error": {"code": "CONFLICT", "message": "The operation conflicts with existing records. Refresh and retry."}
+        })
+    return JSONResponse(status_code=503, headers={"Retry-After": "5"}, content={
+        "error": {"code": "DATABASE_UNAVAILABLE", "message": "Database temporarily unavailable. Please retry."}
+    })
+
+
+@app.exception_handler(OSError)
+async def dependency_error_handler(request: Request, exc: OSError):
+    # asyncpg can raise raw DNS/socket/timeout errors before SQLAlchemy wraps
+    # a DBAPI exception. Storage availability errors need the same safe 503.
+    logging.getLogger(__name__).error("Dependency failure type=%s request_id=%s",
+                                     type(exc).__name__, request.state.request_id)
+    return JSONResponse(status_code=503, headers={"Retry-After": "5"}, content={
+        "error": {"code": "DEPENDENCY_UNAVAILABLE", "message": "A required service is temporarily unavailable. Please retry."}
+    })
+
+
+@app.exception_handler(Exception)
+async def unexpected_error_handler(request: Request, exc: Exception):
+    request_id = getattr(request.state, "request_id", uuid.uuid4().hex)
+    # Do not log URLs, exception values or SQL parameters: they may carry secrets.
+    logging.getLogger(__name__).error("Unhandled failure type=%s request_id=%s", type(exc).__name__, request_id)
+    return JSONResponse(status_code=500, headers={"X-Request-ID": request_id, "Cache-Control": "no-store"}, content={
+        "error": {"code": "INTERNAL_ERROR", "message": "Unexpected server error. Contact support with the request ID.",
+                  "request_id": request_id}
+    })
 
 
 # Global Exception Handler
@@ -109,8 +168,11 @@ async def readiness_check(db: AsyncSession = Depends(get_db_session)):
     """Readiness probe: checks the database rather than just process liveness."""
     try:
         await db.execute(text("SELECT 1"))
-    except SQLAlchemyError:
-        await db.rollback()
+    except (SQLAlchemyError, OSError):
+        try:
+            await db.rollback()
+        except (SQLAlchemyError, OSError):
+            pass  # A disconnected transport must still produce NOT_READY.
         return JSONResponse(
             status_code=503,
             content={"status": "NOT_READY", "database": "UNAVAILABLE"},

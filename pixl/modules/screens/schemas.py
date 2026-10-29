@@ -72,6 +72,9 @@ class ScreenHeartbeatResponse(BaseModel):
     server_time: datetime
     latest_manifest_version: int
     action_required: Optional[str] = None
+    heartbeat_interval_seconds: int = 60
+    content_check_interval_seconds: int = 60
+    recommended_jitter_percent: int = 15
 
 
 class ScreenResponse(BaseModel):

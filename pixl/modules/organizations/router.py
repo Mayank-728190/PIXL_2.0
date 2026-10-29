@@ -7,7 +7,7 @@ from pixl.core.database import get_db_session
 from pixl.core.config import settings
 from pixl.core.dependencies import require_role, require_tenant_context
 from pixl.modules.organizations.schemas import (
-    AgencyCreateRequest, AgencyResponse, AgencyProvisionResponse,
+    AgencyCreateRequest, AgencyResponse, AgencyProvisionResponse, AdminInviteRequest,
     SiteCreateRequest, SiteResponse,
     BrandCreateRequest, BrandResponse
 )
@@ -61,6 +61,44 @@ async def suspend_agency_endpoint(
     """Master suspends an agency and terminates all active sessions."""
     org = await OrganizationService.suspend_agency(db, agency_id, actor_id=session.get("user_id"))
     return AgencyResponse.model_validate(org)
+
+
+@master_router.post("/{agency_id}/admins")
+async def invite_agency_admin(
+    agency_id: str,
+    req: AdminInviteRequest,
+    db: AsyncSession = Depends(get_db_session),
+    session: dict = Depends(require_role(["master_admin"], expected_audience="pixl:audience:master"))
+):
+    token = await OrganizationService.invite_admin(db, agency_id, req.email, session["user_id"])
+    return {"invitation_link": settings.AGENCY_ORIGIN.rstrip("/") + f"/accept-invitation?token={token}"}
+
+
+@master_router.get("/{agency_id}/admins")
+async def list_agency_admins(
+    agency_id: str,
+    db: AsyncSession = Depends(get_db_session),
+    session: dict = Depends(require_role(["master_admin"], expected_audience="pixl:audience:master"))
+):
+    """Master-only account listing. Never expose password or MFA material."""
+    from pixl.modules.auth.models import User
+    from pixl.modules.auth.schemas import UserResponse
+    result = await db.execute(select(User).where(
+        User.organization_id == agency_id, User.role == "agency_admin"
+    ).order_by(User.created_at))
+    return [UserResponse.model_validate(user) for user in result.scalars()]
+
+
+@master_router.delete("/{agency_id}/admins/{user_id}")
+async def delete_agency_admin(
+    agency_id: str,
+    user_id: str,
+    db: AsyncSession = Depends(get_db_session),
+    session: dict = Depends(require_role(["master_admin"], expected_audience="pixl:audience:master"))
+):
+    """Revoke account access without deleting business or audit records."""
+    await OrganizationService.delete_admin(db, agency_id, user_id, session["user_id"])
+    return {"status": "DELETED"}
 
 
 # Agency endpoints

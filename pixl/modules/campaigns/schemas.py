@@ -1,16 +1,21 @@
 from datetime import datetime
 from typing import List, Optional, Dict, Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class CampaignCreateRequest(BaseModel):
     name: str = Field(..., min_length=2, max_length=255)
-    playlist_id: str
+    playlist_id: str = Field(..., min_length=1)
     brand_id: Optional[str] = None
     priority: int = Field(default=100, ge=0, le=1000)
     start_time: datetime
     end_time: datetime
     screen_ids: List[str] = Field(..., min_length=1, description="Target screens")
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def trim_name(cls, value):
+        return value.strip() if isinstance(value, str) else value
 
 
 class ScreenAssignmentResponse(BaseModel):

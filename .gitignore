@@ -56,8 +56,10 @@ ENV/
 env/
 .env.local
 
-# Sensitive environment configuration
+# Sensitive environment configuration (including the legacy misspelling)
 .env
+.env.*
+.evn
 !.env.example
 
 # IDE & Editor files

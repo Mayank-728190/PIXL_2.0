@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from pixl.core.database import get_db_session
+from pixl.core.config import settings
 from pixl.core.rate_limit import enrollment_rate_limit
 from pixl.core.dependencies import require_role, require_tenant_context, get_authenticated_device
 from pixl.core.exceptions import ForbiddenError, NotFoundError
@@ -273,6 +274,8 @@ async def device_heartbeat_endpoint(
     return ScreenHeartbeatResponse(
         server_time=server_time,
         latest_manifest_version=latest_ver,
-        action_required=action
+        action_required=action,
+        heartbeat_interval_seconds=settings.DEVICE_HEARTBEAT_INTERVAL_SECONDS,
+        content_check_interval_seconds=settings.DEVICE_CONTENT_CHECK_INTERVAL_SECONDS
     )
 

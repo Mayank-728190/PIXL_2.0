@@ -1,7 +1,7 @@
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Tuple, Dict, Any
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, update
 from sqlalchemy.orm import selectinload
 
 from pixl.modules.screens.models import Screen, EnrollmentChallenge, DeviceCredential, DeviceCursor
@@ -28,9 +28,14 @@ class ScreenService:
         resolution: str = "1920x1080"
     ) -> Screen:
         # Verify organization exists
-        org_result = await db.execute(select(Organization).where(Organization.id == organization_id))
-        if not org_result.scalar_one_or_none():
-            raise NotFoundError("Target organization not found")
+        org = await db.scalar(select(Organization).where(
+            Organization.id == organization_id).with_for_update())
+        if not org or org.status != "ACTIVE":
+            raise NotFoundError("Active target organization not found")
+        count = await db.scalar(select(func.count()).select_from(Screen).where(
+            Screen.organization_id == organization_id))
+        if count >= org.max_screens:
+            raise ConflictError("Agency screen limit reached")
 
         await require_owned_reference(db, Site, site_id, organization_id)
         screen = Screen(
@@ -51,9 +56,14 @@ class ScreenService:
                             site_id: Optional[str] = None) -> Screen:
         from sqlalchemy import delete, update
         from pixl.modules.auth.models import AuditEvent
-        org = await db.get(Organization, organization_id)
+        org = await db.scalar(select(Organization).where(
+            Organization.id == organization_id).with_for_update())
         if not org or org.status != "ACTIVE":
             raise NotFoundError("Active target agency not found")
+        count = await db.scalar(select(func.count()).select_from(Screen).where(
+            Screen.organization_id == organization_id, Screen.id != screen_id))
+        if count >= org.max_screens:
+            raise ConflictError("Agency screen limit reached")
         await require_owned_reference(db, Site, site_id, organization_id)
         screen = await db.scalar(select(Screen).where(Screen.id == screen_id).with_for_update())
         if not screen:
@@ -68,7 +78,8 @@ class ScreenService:
                 await db.execute(update(EnrollmentChallenge).where(
                     EnrollmentChallenge.screen_id == screen.id).values(status="EXPIRED"))
             screen.organization_id = organization_id
-            screen.current_manifest_version += 1
+            await db.execute(update(Screen).where(Screen.id == screen.id).values(
+                current_manifest_version=Screen.current_manifest_version + 1))
             db.add(AuditEvent(organization_id=organization_id, action="SCREEN_ASSIGNED",
                               resource_type="SCREEN", resource_id=screen.id))
         screen.site_id = site_id
@@ -369,7 +380,8 @@ class ScreenService:
         db.add(assignment)
 
         # 4. Invalidate screen manifest version so player downloads the new ad
-        screen.current_manifest_version += 1
+        await db.execute(update(Screen).where(Screen.id == screen.id).values(
+            current_manifest_version=Screen.current_manifest_version + 1))
         await db.commit()
 
         return {
@@ -416,9 +428,9 @@ class ScreenService:
 
         now = datetime.now(timezone.utc)
         is_online = False
-        if screen.last_heartbeat_at and (now - ensure_utc(screen.last_heartbeat_at)).total_seconds() <= 180:
+        if screen.last_heartbeat_at and (now - ensure_utc(screen.last_heartbeat_at)).total_seconds() <= settings.DEVICE_OFFLINE_THRESHOLD_SECONDS:
             is_online = True
-        elif screen.last_sync_at and (now - ensure_utc(screen.last_sync_at)).total_seconds() <= 180:
+        elif screen.last_sync_at and (now - ensure_utc(screen.last_sync_at)).total_seconds() <= settings.DEVICE_OFFLINE_THRESHOLD_SECONDS:
             is_online = True
 
         # Find active published campaign
@@ -428,10 +440,11 @@ class ScreenService:
             .where(
                 ScreenAssignment.screen_id == screen.id,
                 Campaign.status == "PUBLISHED",
+                Campaign.organization_id == screen.organization_id,
                 Campaign.start_time <= now,
                 Campaign.end_time > now
             )
-            .order_by(Campaign.priority.desc())
+            .order_by(Campaign.priority.desc(), Campaign.created_at.desc(), Campaign.id.asc())
         )
         campaign = camp_res.scalars().first()
 
@@ -502,10 +515,11 @@ class ScreenService:
             .where(
                 ScreenAssignment.screen_id == screen.id,
                 Campaign.status == "PUBLISHED",
+                Campaign.organization_id == screen.organization_id,
                 Campaign.start_time <= now,
                 Campaign.end_time > now
             )
-            .order_by(Campaign.priority.desc())
+            .order_by(Campaign.priority.desc(), Campaign.created_at.desc(), Campaign.id.asc())
         )
         campaign = camp_res.scalars().first()
         if campaign:
@@ -515,7 +529,8 @@ class ScreenService:
                 ScreenAssignment.campaign_id == campaign.id,
                 ScreenAssignment.screen_id == screen.id,
             ))
-            screen.current_manifest_version += 1
+            await db.execute(update(Screen).where(Screen.id == screen.id).values(
+                current_manifest_version=Screen.current_manifest_version + 1))
             await db.commit()
             return {"status": "STOPPED", "campaign_id": campaign.id, "message": "Ad playback stopped."}
 

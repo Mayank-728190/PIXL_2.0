@@ -10,6 +10,10 @@ class AgencyCreateRequest(BaseModel):
     max_screens: int = Field(default=100, ge=1, le=10000)
 
 
+class AdminInviteRequest(BaseModel):
+    email: EmailStr
+
+
 class AgencyResponse(BaseModel):
     id: str
     name: str

@@ -20,11 +20,11 @@ from playwright.async_api import async_playwright, expect
 ROOT = Path(__file__).resolve().parents[1]
 
 
-async def run_check(base_url, password, totp_secret, temporary):
+async def run_check(base_url, password, totp_secret, temporary, *, verify_tls=True):
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(channel=os.environ.get("PIXL_BROWSER_CHANNEL", "chrome"), headless=True)
+        browser = await playwright.chromium.launch(channel=os.environ.get("PIXL_BROWSER_CHANNEL", "chrome") or None, headless=True)
         try:
-            context = await browser.new_context(viewport={"width": 1440, "height": 900})
+            context = await browser.new_context(viewport={"width": 1440, "height": 900}, ignore_https_errors=not verify_tls)
             page = await context.new_page()
             errors = []
             page.on("pageerror", lambda error: errors.append(str(error)))
@@ -34,6 +34,8 @@ async def run_check(base_url, password, totp_secret, temporary):
             await page.locator('#login-form [name="totp_code"]').fill(pyotp.TOTP(totp_secret).now())
             await page.locator('#login-form button').click()
             await expect(page.locator("#workspace")).to_be_visible()
+            await expect(page.locator("#metrics .metric")).to_have_count(4)
+            await expect(page.locator("#pulse-chart")).to_have_attribute("aria-label", "Online screens over 1 observations this session. Latest: 0 of 0.")
             await page.locator('#provision-agency [name="name"]').fill("Browser agency")
             await page.locator('#provision-agency [name="slug"]').fill("browser-agency")
             await page.locator('#provision-agency [name="admin_email"]').fill("agency@example.com")
@@ -46,7 +48,7 @@ async def run_check(base_url, password, totp_secret, temporary):
             await page.locator('#provision-screen button').click()
             await expect(page.locator("#screens")).to_contain_text("Browser screen")
 
-            agency_context = await browser.new_context(viewport={"width": 1440, "height": 900})
+            agency_context = await browser.new_context(viewport={"width": 1440, "height": 900}, ignore_https_errors=not verify_tls)
             agency_page = await agency_context.new_page()
             agency_page.on("pageerror", lambda error: errors.append(str(error)))
             await agency_page.goto(invitation)
@@ -60,7 +62,7 @@ async def run_check(base_url, password, totp_secret, temporary):
             await agency_page.locator('#login-form button').click()
             await expect(agency_page.locator("#workspace")).to_be_visible()
             await expect(agency_page.locator("#screens")).to_contain_text("Browser screen")
-            async with httpx.AsyncClient(base_url=base_url) as client:
+            async with httpx.AsyncClient(base_url=base_url, verify=verify_tls) as client:
                 challenge = (await client.post("/api/v1/device/enroll/challenge", json={"hardware_fingerprint": "browser-test-hardware"})).json()
                 await agency_page.locator("#claim-target").select_option(label="Browser screen")
                 await agency_page.locator('#claim-screen [name="pin"]').fill(challenge["pin"])
@@ -70,15 +72,37 @@ async def run_check(base_url, password, totp_secret, temporary):
             from PIL import Image
             image = Path(temporary) / "poster.png"
             Image.new("RGB", (64, 32), "green").save(image)
-            await agency_page.locator("#files").set_input_files(image)
+            second_image = Path(temporary) / "landscape.png"
+            Image.new("RGB", (128, 64), "orange").save(second_image)
+            await agency_page.locator("#files").set_input_files([image, second_image])
             await expect(agency_page.locator("#upload-progress")).to_contain_text("poster.png: ready", timeout=30000)
             await expect(agency_page.locator("#media-rows")).to_contain_text("poster.png")
-            await agency_page.locator('#media-rows input[type="checkbox"]').check()
+            await expect(agency_page.locator("#upload-progress")).to_contain_text("landscape.png: ready", timeout=30000)
+            await expect(agency_page.locator("#media-rows tr")).to_have_count(2)
+            # The action dialog must fit the viewport, even at a narrow screen size.
+            await agency_page.set_viewport_size({"width": 390, "height": 640})
+            await agency_page.locator('#media-rows button[aria-haspopup="dialog"]').first.click()
+            await expect(agency_page.locator("#media-actions")).to_be_visible()
+            box = await agency_page.locator("#media-actions").bounding_box()
+            assert box and box["x"] >= 0 and box["y"] >= 0 and box["y"] + box["height"] <= 640
+            await agency_page.get_by_role("button", name="Use in a new campaign").click()
+            await expect(agency_page.locator("#media-actions")).not_to_be_visible()
+            await expect(agency_page.locator("#selection-summary")).to_contain_text("1 selected")
+            await agency_page.set_viewport_size({"width": 1440, "height": 900})
             await agency_page.locator('#campaign-form [name="name"]').fill("Browser campaign")
             await agency_page.locator('#campaign-targets input[type="checkbox"]').check()
+            # Simulate one failed publish response. The UI must recover the
+            # saved draft rather than creating another playlist/campaign.
+            await agency_page.route("**/api/v1/agency/campaigns/*/publish",
+                                    lambda route: route.fulfill(status=503, json={"error": {"message": "Temporary publish failure"}}),
+                                    times=1)
             await agency_page.locator('#campaign-form button').click()
-            await expect(agency_page.locator("#notice")).to_contain_text("Campaign published", timeout=15000)
-            await expect(agency_page.locator("#campaign-rows")).to_contain_text("PUBLISHED")
+            await expect(agency_page.locator("#campaign-error")).to_contain_text("Use “Publish draft”", timeout=15000)
+            await expect(agency_page.locator("#campaign-rows")).to_contain_text("DRAFT")
+            await agency_page.get_by_role("button", name="Publish draft").click()
+            await expect(agency_page.locator("#notice")).to_contain_text("Saved campaign published")
+            await expect(agency_page.locator("#campaign-rows")).to_contain_text("LIVE WINDOW")
+            await expect(agency_page.locator("#campaign-rows tr")).to_have_count(1)
             # Verify that cookie sessions survive navigation without a localStorage token.
             await agency_page.reload()
             await expect(agency_page.locator("#workspace")).to_be_visible()
@@ -86,7 +110,21 @@ async def run_check(base_url, password, totp_secret, temporary):
             for width in (390, 768, 1440, 1920):
                 await agency_page.set_viewport_size({"width": width, "height": 900})
                 assert await agency_page.evaluate("document.documentElement.scrollWidth <= window.innerWidth + 1"), f"Page overflow at {width}px"
-            await agency_page.locator("#logout").click()
+            # Admin access is managed only in the master workspace.
+            await page.get_by_role("button", name="Admin accounts", exact=True).click()
+            await expect(page.locator("#media-actions")).to_contain_text("agency@example.com")
+            page.once("dialog", lambda dialog: dialog.accept())
+            await page.get_by_role("button", name="Delete admin access", exact=True).click()
+            await expect(page.locator("#notice")).to_contain_text("Admin access deleted")
+            await agency_page.locator("#refresh").click()
+            await expect(agency_page.locator("#login")).to_be_visible()
+            # Master can still sign out after the agency account was removed.
+            await page.locator("#logout").click()
+            await expect(page.locator("#login")).to_be_visible()
+            # Agency session already expired by revocation.
+            await agency_page.reload()
+            # Verify the signed-out screen remains available.
+
             await expect(agency_page.locator("#login")).to_be_visible()
             assert not errors, "Browser JavaScript errors: " + "; ".join(errors)
         finally:
@@ -105,7 +143,7 @@ def main():
             "DATABASE_URL": "sqlite+aiosqlite:///" + (Path(temporary) / "browser.db").as_posix(),
             "LOCAL_STORAGE_PATH": str(Path(temporary) / "storage"),
             "ENVIRONMENT": "development", "DEBUG": "false", "SESSION_BACKEND": "memory",
-            "PORTAL_PANEL": "all", "SESSION_COOKIE_SECURE": "false",
+            "PORTAL_PANEL": "all", "SESSION_COOKIE_SECURE": "false", "MEDIA_PROCESSING_MODE": "inline",
             "AGENCY_ORIGIN": base_url, "MASTER_ORIGIN": base_url,
             "MASTER_BOOTSTRAP_EMAIL": "master@example.com", "MASTER_BOOTSTRAP_PASSWORD": password,
             "MASTER_BOOTSTRAP_TOTP_SECRET": totp_secret,
@@ -138,7 +176,7 @@ def main():
                 except subprocess.TimeoutExpired:
                     server.kill()
                     server.wait()
-    print("Portal browser smoke check passed: provisioning, invitation, pairing, real upload, campaign publication, responsive layouts, cookie session and logout.")
+    print("Portal browser smoke check passed: provisioning, invitation, pairing, batch upload, media dialog, graphs, draft publication recovery, responsive layouts, cookie session, admin revocation and logout.")
 
 
 if __name__ == "__main__":

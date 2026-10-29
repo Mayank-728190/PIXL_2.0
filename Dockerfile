@@ -1,5 +1,5 @@
 # Multi-stage production Dockerfile for PIXL 2.0 API & Workers
-FROM python:3.12-slim-bookworm as builder
+FROM python:3.12-slim-bookworm AS builder
 
 WORKDIR /app
 
@@ -8,11 +8,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+COPY requirements.lock .
+RUN pip install --no-cache-dir --prefix=/install --require-hashes -r requirements.lock
 
 # Final production stage
-FROM python:3.12-slim-bookworm as runner
+FROM python:3.12-slim-bookworm AS runner
 
 WORKDIR /app
 

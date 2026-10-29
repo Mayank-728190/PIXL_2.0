@@ -1,250 +1,137 @@
-"""
-PIXL 2.0 - Universal Services Launcher (start_all.py)
-======================================================
-Starts the PIXL 2.0 Digital Signage Core Platform:
- 1. Environment & Database Verification
- 2. FastAPI Backend Server (API, Media Streaming, Native TV Endpoints)
- 3. Browser Screen Simulator (http://localhost:8000/simulator)
- 4. Celery Background Worker (if Redis is active)
- 5. Clean process supervision with graceful Ctrl+C shutdown.
-"""
+"""Development launcher. Never seeds accounts or silently applies migrations.
 
+Production: use the migration/API/worker/Beat services in docker-compose.yml.
+"""
+import argparse
+import asyncio
 import os
+from pathlib import Path
+import signal
+import subprocess
 import sys
 import time
-import socket
-import signal
-import shutil
-import subprocess
-from pathlib import Path
-from urllib.request import urlopen, Request
 from urllib.error import URLError
+from urllib.request import urlopen
 
 ROOT_DIR = Path(__file__).resolve().parent
-ENV_FILE = ROOT_DIR / ".env"
-ENV_EXAMPLE = ROOT_DIR / ".env.example"
 
 
-def find_python_executable() -> Path:
-    """Finds the virtualenv python interpreter or falls back to sys.executable."""
-    if os.name == "nt":
-        venv_py = ROOT_DIR / ".venv" / "Scripts" / "python.exe"
-    else:
-        venv_py = ROOT_DIR / ".venv" / "bin" / "python"
-
-    if venv_py.exists():
-        return venv_py
-    return Path(sys.executable)
-
-
-# Automatic venv delegation: if run with global python, re-exec under .venv
-TARGET_PYTHON = find_python_executable()
-if TARGET_PYTHON.exists() and Path(sys.executable).resolve() != TARGET_PYTHON.resolve():
-    try:
-        res = subprocess.call([str(TARGET_PYTHON)] + sys.argv)
-        sys.exit(res)
-    except Exception as _e:
-        pass
-
-
-def print_banner(text: str):
-    print(f"\n\033[1;36m{'=' * 72}\033[0m")
-    print(f"\033[1;36m  {text}\033[0m")
-    print(f"\033[1;36m{'=' * 72}\033[0m\n")
-
-
-def log(prefix: str, msg: str, color: str = "\033[1;32m"):
-    print(f"{color}[{prefix}]\033[0m {msg}", flush=True)
-
-
-def get_local_ip() -> str:
-    """Detects outbound LAN IP for Android TV device connectivity."""
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
-    except Exception:
-        return "127.0.0.1"
-
-
-def ensure_environment():
-    """Ensures .env exists and pythonpath includes ROOT_DIR."""
-    if not ENV_FILE.exists() and ENV_EXAMPLE.exists():
-        log("Setup", "Creating .env from .env.example...", "\033[1;33m")
-        shutil.copy(ENV_EXAMPLE, ENV_FILE)
-
-    if str(ROOT_DIR) not in sys.path:
-        sys.path.insert(0, str(ROOT_DIR))
-    os.environ["PYTHONPATH"] = str(ROOT_DIR)
+def find_python_executable():
+    path = ROOT_DIR / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    return path if path.exists() else Path(sys.executable)
 
 
 def ensure_database():
-    """Applies pending Alembic migrations and bootstraps default accounts."""
-    log("Database", "Synchronizing schema (alembic upgrade head)...", "\033[1;34m")
-    try:
-        from alembic import command
-        from alembic.config import Config
-        alembic_cfg = Config(str(ROOT_DIR / "alembic.ini"))
-        alembic_cfg.set_main_option("script_location", str(ROOT_DIR / "alembic"))
-        command.upgrade(alembic_cfg, "head")
-        log("Database", "Database schema is synchronized.", "\033[1;32m")
-    except Exception as e:
-        log("Database", f"Schema migration warning: {e}", "\033[1;31m")
+    """Verify migration history without changing customer data."""
+    from alembic.config import Config
+    from alembic.runtime.migration import MigrationContext
+    from alembic.script import ScriptDirectory
+    from pixl.core.database import engine
 
-    try:
-        seed_script = ROOT_DIR / "scripts" / "seed_users.py"
-        if seed_script.exists():
-            subprocess.run([str(TARGET_PYTHON), str(seed_script)], check=True, cwd=str(ROOT_DIR))
-    except Exception as e:
-        log("Database", f"Seed bootstrap error: {e}", "\033[1;31m")
+    async def check():
+        try:
+            async with engine.connect() as connection:
+                return await connection.run_sync(lambda conn: MigrationContext.configure(conn).get_current_heads())
+        finally:
+            await engine.dispose()
+
+    actual = set(asyncio.run(check()))
+    expected = set(ScriptDirectory.from_config(Config(str(ROOT_DIR / "alembic.ini"))).get_heads())
+    if actual != expected:
+        raise RuntimeError("Database migrations are pending. Back up the database, then run python -m alembic upgrade head.")
 
 
-def is_redis_online(redis_url: str = "redis://localhost:6379/0") -> bool:
-    """Checks whether local Redis instance is reachable."""
+def is_redis_online(redis_url):
+    import redis
     try:
-        import redis
-        client = redis.from_url(redis_url, socket_connect_timeout=1.0)
-        return bool(client.ping())
-    except Exception:
+        with redis.from_url(redis_url, socket_connect_timeout=2, socket_timeout=2) as client:
+            return bool(client.ping())
+    except redis.RedisError:
         return False
 
 
-def wait_for_api_ready(port: int = 8000, timeout_seconds: int = 20) -> bool:
-    """Poll database readiness, not just process liveness."""
-    url = f"http://127.0.0.1:{port}/api/v1/health/ready"
-    start_time = time.time()
-    while time.time() - start_time < timeout_seconds:
+def wait_for_api_ready(port=8000, timeout_seconds=25):
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
         try:
-            req = Request(url, headers={"User-Agent": "PIXL-Launcher"})
-            with urlopen(req, timeout=1.0) as resp:
-                if resp.status == 200:
+            with urlopen(f"http://127.0.0.1:{port}/api/v1/health/ready", timeout=1) as response:
+                if response.status == 200:
                     return True
-        except (URLError, ConnectionResetError, OSError):
+        except (URLError, OSError):
             pass
         time.sleep(0.5)
     return False
 
 
 def main():
-    ensure_environment()
-    ensure_database()
-
-    # Load configuration
+    python = find_python_executable()
+    if Path(sys.executable).resolve() != python.resolve():
+        raise SystemExit(subprocess.call([str(python), str(Path(__file__).resolve()), *sys.argv[1:]], cwd=ROOT_DIR))
+    os.chdir(ROOT_DIR)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--migrate", action="store_true", help="Explicitly apply pending migrations; back up your database first")
+    args = parser.parse_args()
+    from pixl.core.config import settings
+    if settings.ENVIRONMENT == "production":
+        raise SystemExit("Use the production Compose services, not the development launcher.")
     try:
-        from pixl.core.config import settings
-        host = settings.HOST
-        port = settings.PORT
-        redis_url = settings.REDIS_URL
-    except Exception as e:
-        log("Config", "Invalid configuration; startup aborted.", "\033[1;31m")
-        raise SystemExit(1) from e
+        if args.migrate:
+            subprocess.run([str(python), "-m", "alembic", "upgrade", "head"], cwd=ROOT_DIR, check=True)
+        ensure_database()
+    except Exception:
+        print("Database verification failed. Back up and inspect migration history, then run python -m alembic upgrade head.", file=sys.stderr)
+        raise SystemExit(1) from None
 
-    local_ip = get_local_ip()
+    broker_ready = is_redis_online(settings.CELERY_BROKER_URL)
+    if settings.MEDIA_PROCESSING_MODE == "worker" and not broker_ready:
+        raise SystemExit("Worker processing requires a reachable CELERY_BROKER_URL. Start Redis or select inline mode.")
     processes = []
 
-    def shutdown(signum=None, frame=None, exit_status=0):
-        print_banner("SHUTTING DOWN ALL PIXL SERVICES")
-        for p, name in processes:
-            if p.poll() is None:
-                log("Stop", f"Stopping {name} (PID: {p.pid})...", "\033[1;33m")
-                p.terminate()
-                try:
-                    p.wait(timeout=4)
-                except subprocess.TimeoutExpired:
-                    p.kill()
-                    p.wait()
-        log("Exit", "All services stopped cleanly.", "\033[1;32m")
-        sys.exit(exit_status)
+    def shutdown(signum=None, frame=None):
+        for process, _ in reversed(processes):
+            if process.poll() is None:
+                process.terminate()
+        for process, _ in reversed(processes):
+            try:
+                process.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+        if signum is not None:
+            raise SystemExit(0)
 
     signal.signal(signal.SIGINT, shutdown)
-    if hasattr(signal, "SIGTERM"):
-        signal.signal(signal.SIGTERM, shutdown)
+    signal.signal(signal.SIGTERM, shutdown)
 
-    print_banner("STARTING PIXL 2.0 DIGITAL SIGNAGE PLATFORM")
+    def launch(name, arguments):
+        processes.append((subprocess.Popen([str(python), "-m", *arguments], cwd=ROOT_DIR), name))
 
-    # 1. Start Celery Worker (if Redis is running)
-    if is_redis_online(redis_url):
-        log("Celery", "Redis is reachable. Launching background worker...", "\033[1;34m")
-        celery_pool = ["-P", "solo"] if sys.platform.startswith("win") else []
-        celery_cmd = [
-            str(TARGET_PYTHON), "-m", "celery",
-            "-A", "pixl.workers.celery_app",
-            "worker",
-            "--loglevel=INFO"
-        ] + celery_pool
-        p_celery = subprocess.Popen(celery_cmd, cwd=str(ROOT_DIR), env=os.environ.copy())
-        processes.append((p_celery, "Celery Worker"))
-    else:
-        log("Celery", "Redis not detected locally. Background worker skipped (API operating standalone).", "\033[1;33m")
-
-    # 2. Launch FastAPI API Server
-    log("FastAPI", f"Launching Uvicorn server on http://{host}:{port}...", "\033[1;34m")
-    uvicorn_cmd = [
-        str(TARGET_PYTHON), "-m", "uvicorn",
-        "pixl.main:app",
-        "--host", host,
-        "--port", str(port),
-        "--no-access-log",
-    ]
-    p_uvicorn = subprocess.Popen(uvicorn_cmd, cwd=str(ROOT_DIR), env=os.environ.copy())
-    processes.append((p_uvicorn, "FastAPI Backend"))
-
-    # 3. Wait for API readiness
-    log("Health", "Verifying application readiness...", "\033[1;35m")
-    is_ready = wait_for_api_ready(port=port, timeout_seconds=25)
-
-    if not is_ready:
-        log("Error", "Server failed to respond to /health probe within 25 seconds.", "\033[1;31m")
-        shutdown(exit_status=1)
-
-    # 4. Display Status Dashboard
     try:
-        import pyotp
-        totp = pyotp.TOTP("JBSWY3DPEHPK3PXP")
-        current_mfa = totp.now()
-    except Exception:
-        current_mfa = "Check pyotp"
-
-    print(f"\n\033[1;32m{'=' * 72}\033[0m")
-    print(f"\033[1;32m  PIXL 2.0 CORE PLATFORM IS ONLINE AND READY\033[0m")
-    print(f"\033[1;32m{'=' * 72}\033[0m")
-    print(f"  \033[1m* API Root:\033[0m            http://localhost:{port}")
-    print(f"  \033[1m* Interactive Docs:\033[0m    http://localhost:{port}/api/docs")
-    print(f"  \033[1m* Screen Simulator:\033[0m    http://localhost:{port}/simulator")
-    print(f"  \033[1m* Health Probe:\033[0m        http://localhost:{port}/health")
-    print(f"  \033[1m* Native TV URL (LAN):\033[0m http://{local_ip}:{port}")
-    print(f"\033[1;32m{'-' * 72}\033[0m")
-    print(f"  \033[1;36m[DEFAULT LOGIN CREDENTIALS]\033[0m")
-    print(f"  \033[1m1. Master Portal:\033[0m      http://localhost:{port}/master")
-    print(f"     Email:              master@pixl.io")
-    print(f"     Password:           MasterPassword123!")
-    print(f"     MFA / TOTP Code:    \033[1;33m999999\033[0m (or rotating code: {current_mfa} / Secret: JBSWY3DPEHPK3PXP)")
-    print()
-    print(f"  \033[1m2. Agency Portal:\033[0m      http://localhost:{port}/agency")
-    print(f"     Email:              admin@demoagency.com")
-    print(f"     Password:           AgencyPassword123!")
-    print(f"     MFA Code:           (Leave empty)")
-    print(f"\033[1;32m{'-' * 72}\033[0m")
-    print(f"  \033[1m* Android APK:\033[0m         app/app-debug.apk")
-    print(f"  \033[1m* Quick TV Setup:\033[0m      In app-debug.apk, set server to: http://{local_ip}:{port}")
-    print(f"  \033[1m* To Exit:\033[0m             Press Ctrl+C to stop all services")
-    print(f"\033[1;32m{'=' * 72}\033[0m\n")
-
-    # 5. Supervise running processes
-    try:
+        if broker_ready:
+            worker = ["celery", "-A", "pixl.workers.celery_app:celery_app", "worker", "--loglevel=INFO", "--concurrency=2"]
+            if os.name == "nt":
+                worker += ["--pool=solo"]
+            launch("worker", worker)
+            launch("scheduler", ["celery", "-A", "pixl.workers.celery_app:celery_app", "beat", "--loglevel=INFO"])
+        else:
+            print("Redis unavailable: using inline processing; scheduled maintenance is not running.")
+        launch("API", ["uvicorn", "pixl.main:app", "--host", settings.HOST, "--port", str(settings.PORT), "--no-access-log"])
+        if not wait_for_api_ready(settings.PORT):
+            raise RuntimeError("API failed readiness checks")
+        print(f"Master: http://localhost:{settings.PORT}/master")
+        print(f"Agency: http://localhost:{settings.PORT}/agency")
+        print("Use your own account. First account: python -m scripts.create_master")
+        print("Press Ctrl+C to stop. Never expose this development server directly to the Internet.")
         while True:
-            for p, name in processes:
-                exit_code = p.poll()
-                if exit_code is not None:
-                    log("Alert", f"{name} exited unexpectedly with code {exit_code}.", "\033[1;31m")
-                    shutdown(exit_status=exit_code or 1)
+            for process, name in processes:
+                if process.poll() is not None:
+                    raise RuntimeError(f"{name} exited unexpectedly")
             time.sleep(1)
     except KeyboardInterrupt:
+        pass
+    finally:
         shutdown()
 
 
 if __name__ == "__main__":
     main()
-

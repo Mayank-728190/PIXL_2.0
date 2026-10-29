@@ -1,5 +1,7 @@
 import base64
 import hashlib
+import hmac
+import time
 import json
 import secrets
 from typing import Tuple, Dict, Any
@@ -55,25 +57,25 @@ def get_totp_uri(secret: str, account_name: str, issuer_name: str = "PIXL Signag
     return totp.provisioning_uri(name=account_name, issuer_name=issuer_name)
 
 
-def verify_totp_code(secret: str, code: str) -> bool:
-    """Verify a 6-digit TOTP MFA code."""
-    if not secret or not code:
-        return False
+def matching_totp_counter(secret: str, code: str) -> int | None:
+    """Return the accepted time step so login can consume it atomically."""
+    if not secret or not code or len(code) != 6 or not code.isascii() or not code.isdigit():
+        return None
     try:
         totp = pyotp.TOTP(secret)
-        totp.now()
-    except Exception:
-        return False
+        counter = int(time.time()) // totp.interval
+        for offset in (0, -1, 1):
+            step = counter + offset
+            if step >= 0 and hmac.compare_digest(totp.generate_otp(step), code):
+                return step
+    except (ValueError, TypeError, base64.binascii.Error):
+        return None
+    return None
 
-    # In development mode (DEBUG=True), allow 999999 as a convenient static testing code
-    from pixl.core.config import settings
-    if settings.DEBUG and code == "999999":
-        return True
 
-    try:
-        return totp.verify(code, valid_window=1)
-    except (ValueError, TypeError):
-        return False
+def verify_totp_code(secret: str, code: str) -> bool:
+    """No static testing backdoor, even when DEBUG is enabled."""
+    return matching_totp_counter(secret, code) is not None
 
 
 def hash_device_token(token: str) -> str:

@@ -3,10 +3,12 @@ from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pixl.core.database import get_db_session
+from pixl.core.config import settings
+from pixl.core.exceptions import ConflictError
 from pixl.core.dependencies import require_role, require_tenant_context
 from pixl.modules.media.schemas import (
     UploadTicketRequest, UploadTicketResponse,
-    FinalizeUploadRequest, MediaAssetResponse
+    FinalizeUploadRequest, MediaAssetResponse, ProcessingStatusResponse
 )
 from pixl.modules.media.service import MediaService
 
@@ -40,7 +42,7 @@ async def request_upload_ticket(
 async def upload_media_bytes(
     ticket_id: str,
     request: Request,
-    signature: str = Query(..., min_length=64, max_length=64),
+    signature: str = Query(..., pattern="^[a-f0-9]{64}$"),
     db: AsyncSession = Depends(get_db_session),
 ):
     """Upload raw bytes using a single-use, expiring signed ticket URL."""
@@ -55,7 +57,9 @@ async def finalize_media_upload(
     org_id: str = Depends(require_tenant_context),
     session: dict = Depends(require_role(["agency_admin", "agency_operator"], expected_audience="pixl:audience:agency"))
 ):
-    """Validate uploaded bytes, inspect media, generate a thumbnail and publish."""
+    """Legacy synchronous finalization; use /process for durable jobs."""
+    if settings.MEDIA_PROCESSING_MODE == "worker":
+        raise ConflictError("Use /api/v1/agency/media/process and poll upload status in worker mode")
     asset = await MediaService.finalize_upload(
         db=db,
         organization_id=org_id,
@@ -64,6 +68,27 @@ async def finalize_media_upload(
         expected_sha256=req.expected_sha256
     )
     return MediaAssetResponse.model_validate(asset)
+
+
+@router.post("/process", response_model=ProcessingStatusResponse, status_code=202)
+async def request_media_processing(
+    req: FinalizeUploadRequest,
+    db: AsyncSession = Depends(get_db_session),
+    org_id: str = Depends(require_tenant_context),
+    session: dict = Depends(require_role(["agency_admin", "agency_operator"], expected_audience="pixl:audience:agency")),
+):
+    """Durably queue processing in worker mode; inline fallback for local use."""
+    return await MediaService.request_processing(db, org_id, req.ticket_id, req.brand_id, req.expected_sha256)
+
+
+@router.get("/uploads/{ticket_id}", response_model=ProcessingStatusResponse)
+async def media_processing_status(
+    ticket_id: str,
+    db: AsyncSession = Depends(get_db_session),
+    org_id: str = Depends(require_tenant_context),
+    session: dict = Depends(require_role(["agency_admin", "agency_operator"], expected_audience="pixl:audience:agency")),
+):
+    return await MediaService.processing_status(db, org_id, ticket_id)
 
 
 @router.get("", response_model=List[MediaAssetResponse])

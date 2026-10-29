@@ -1,0 +1,86 @@
+name: Verify
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        database: [sqlite, postgres]
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: pixl_test
+          POSTGRES_PASSWORD: ci-only-not-a-deployment-credential
+          POSTGRES_DB: pixl_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U pixl_test -d pixl_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DEBUG: "false"
+      ENVIRONMENT: development
+      SESSION_BACKEND: memory
+      DATABASE_URL: sqlite+aiosqlite:///./ci_unused.db
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.lock
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - run: python -m pip install --require-hashes -r requirements.lock
+      - run: python -m pip install -e ".[dev,browser]" pip-audit
+      - name: Choose isolated PostgreSQL tests and real Redis broker
+        if: matrix.database == 'postgres'
+        run: |
+          echo 'PIXL_TEST_DATABASE_URL=postgresql+asyncpg://pixl_test:ci-only-not-a-deployment-credential@localhost:5432/pixl_test' >> "$GITHUB_ENV"
+          echo 'PIXL_TEST_REDIS_URL=redis://localhost:6379/13' >> "$GITHUB_ENV"
+      - run: python -m pytest
+      - run: python -m pip check
+      - run: python -m pip_audit -r requirements.lock --disable-pip --no-deps --progress-spinner off
+      - run: python -m compileall -q pixl scripts start_all.py
+      - run: node --check pixl/portals/portal.js
+      - name: Real-browser workflow
+        if: matrix.database == 'sqlite'
+        env:
+          PIXL_BROWSER_CHANNEL: ""
+        run: |
+          python -m playwright install --with-deps chromium
+          python -m scripts.check_portals_browser
+
+  docker-production-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PIXL_BROWSER_CHANNEL: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.lock
+      - run: python -m pip install --require-hashes -r requirements.lock
+      - run: python -m pip install -e ".[dev,browser]"
+      - run: python -m playwright install --with-deps chromium
+      - name: Isolated production stack, browser, crash/outage recovery and restore
+        run: python -m scripts.check_docker

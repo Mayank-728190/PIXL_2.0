@@ -3,7 +3,7 @@ from typing import Optional, List, Dict, Any
 import json
 import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import selectinload
 
 from pixl.modules.campaigns.models import Campaign, ScreenAssignment, CampaignVersion
@@ -98,11 +98,16 @@ class CampaignService:
             select(Campaign)
             .where(Campaign.id == campaign_id, Campaign.organization_id == organization_id)
             .options(selectinload(Campaign.assignments))
+            .with_for_update()
         )
         campaign = res.scalar_one_or_none()
         if not campaign:
             raise NotFoundError("Campaign not found")
 
+        if campaign.status == "PUBLISHED":
+            return campaign  # Safe HTTP retries must not repeatedly invalidate devices.
+        if campaign.status not in {"DRAFT", "APPROVED"}:
+            raise ConflictError("Only draft or approved campaigns can be published")
         if ensure_utc(campaign.end_time) <= datetime.now(timezone.utc):
             raise ConflictError("Cannot publish an expired campaign")
         playlist = await db.scalar(select(Playlist).where(
@@ -116,15 +121,17 @@ class CampaignService:
         for assignment in campaign.assignments:
             await require_owned_reference(db, Screen, assignment.screen_id, organization_id)
 
-        campaign.status = "PUBLISHED"
-        campaign.current_version += 1
-
-        # Increment target screens manifest versions so they trigger refresh
-        for assignment in campaign.assignments:
-            s_res = await db.execute(select(Screen).where(Screen.id == assignment.screen_id))
-            screen = s_res.scalar_one_or_none()
-            if screen:
-                screen.current_manifest_version += 1
+        published = await db.execute(update(Campaign).where(
+            Campaign.id == campaign.id, Campaign.status.in_(["DRAFT", "APPROVED"])
+        ).values(status="PUBLISHED", current_version=Campaign.current_version + 1))
+        if published.rowcount != 1:
+            await db.rollback()
+            raise ConflictError("Campaign changed during publication; refresh and retry")
+        # Atomic increments avoid losing another campaign's concurrent update.
+        await db.execute(update(Screen).where(
+            Screen.id.in_([a.screen_id for a in campaign.assignments]),
+            Screen.organization_id == organization_id
+        ).values(current_manifest_version=Screen.current_manifest_version + 1))
 
         await db.commit()
         return campaign
@@ -150,9 +157,10 @@ class CampaignService:
                 ScreenAssignment.screen_id == screen_id,
                 Campaign.organization_id == screen.organization_id,
                 Campaign.status == "PUBLISHED",
-                Campaign.end_time > now
+                Campaign.end_time > now,
+                Campaign.start_time < valid_until
             )
-            .order_by(Campaign.priority.desc(), Campaign.created_at.desc())
+            .order_by(Campaign.priority.desc(), Campaign.created_at.desc(), Campaign.id.asc())
         )
         camp_res = await db.execute(query)
         campaigns = camp_res.scalars().all()

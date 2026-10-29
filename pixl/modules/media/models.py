@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from typing import Optional
-from sqlalchemy import String, Integer, BigInteger, DateTime, ForeignKey, Text
+from sqlalchemy import String, Integer, BigInteger, DateTime, ForeignKey, Text, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from pixl.core.database import Base, UUIDPrimaryKeyMixin, TimestampMixin
@@ -41,6 +41,11 @@ class MediaAsset(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
 class UploadTicket(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "upload_tickets"
+    __table_args__ = (
+        Index("ix_upload_tickets_dispatch", "status", "next_attempt_at"),
+        Index("ix_upload_tickets_leases", "status", "lease_expires_at"),
+        Index("ix_upload_tickets_cleanup", "status", "quarantine_cleaned_at", "updated_at"),
+    )
 
     organization_id: Mapped[str] = mapped_column(
         String(36),
@@ -53,6 +58,15 @@ class UploadTicket(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     declared_mime: Mapped[str] = mapped_column(String(100), nullable=False)
     storage_key: Mapped[str] = mapped_column(String(512), unique=True, nullable=False)
     presigned_url: Mapped[str] = mapped_column(String(1024), nullable=False)
-    status: Mapped[str] = mapped_column(String(50), default="PENDING", nullable=False)  # PENDING, FINALIZED, EXPIRED
+    # PENDING → UPLOADING → UPLOADED → QUEUED/PROCESSING → FINALIZED or FAILED; EXPIRED for abandonment.
+    status: Mapped[str] = mapped_column(String(50), default="PENDING", nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    quarantine_cleaned_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    processing_brand_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    expected_sha256: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    processing_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    processing_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    next_attempt_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_token: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    lease_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 

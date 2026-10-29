@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from typing import Optional
-from sqlalchemy import String, Boolean, DateTime, ForeignKey, Text
+from sqlalchemy import String, Boolean, DateTime, ForeignKey, Text, BigInteger
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from pixl.core.database import Base, UUIDPrimaryKeyMixin, TimestampMixin
@@ -22,6 +22,7 @@ class User(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     totp_secret: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     is_mfa_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    last_totp_counter: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     last_login_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     organization: Mapped[Optional["Organization"]] = relationship("Organization", back_populates="users")

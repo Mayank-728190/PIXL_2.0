@@ -1,12 +1,12 @@
 from datetime import datetime, timezone
 from typing import Optional, Tuple
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update
+from sqlalchemy import select, update, or_
 from starlette.concurrency import run_in_threadpool
 
 from pixl.modules.auth.models import User, UserInvitation, AuditEvent
 from pixl.core.database import ensure_utc
-from pixl.core.security import verify_password, hash_password, verify_totp_code
+from pixl.core.security import verify_password, hash_password, matching_totp_counter
 from pixl.core.session import SessionManager
 from pixl.core.exceptions import AuthenticationError, ForbiddenError, NotFoundError, ConflictError
 
@@ -44,8 +44,6 @@ class AuthService:
             # Master authentication must fail closed if MFA is not configured.
             if not user.is_mfa_enabled or not user.totp_secret:
                 raise AuthenticationError("TOTP MFA setup is required for Master login")
-            if not totp_code or not verify_totp_code(user.totp_secret, totp_code):
-                raise AuthenticationError("Valid TOTP 2FA code is required for Master login")
         elif panel_audience == "pixl:audience:agency":
             if user.role not in ["agency_admin", "agency_operator"]:
                 raise ForbiddenError("Access restricted to Agency members")
@@ -55,10 +53,20 @@ class AuthService:
         else:
             raise ForbiddenError("Unknown authentication audience")
 
-        # Optional MFA check if enabled on user account
-        if user.is_mfa_enabled and user.totp_secret and panel_audience != "pixl:audience:master":
-            if not totp_code or not verify_totp_code(user.totp_secret, totp_code):
+        if user.is_mfa_enabled:
+            counter = matching_totp_counter(user.totp_secret, totp_code)
+            if counter is None:
                 raise AuthenticationError("Valid TOTP 2FA code is required")
+            consumed = await db.execute(update(User).where(
+                User.id == user.id, User.totp_secret == user.totp_secret,
+                or_(User.last_totp_counter.is_(None), User.last_totp_counter < counter)
+            ).values(last_totp_counter=counter))
+            if consumed.rowcount != 1:
+                raise AuthenticationError("Authenticator code already used; wait for a new code")
+
+        # Commit authentication state before issuing a usable session.
+        user.last_login_at = datetime.now(timezone.utc)
+        await db.commit()
 
         # 4. Create isolated session
         session_token = await run_in_threadpool(SessionManager.create_session,
@@ -67,10 +75,6 @@ class AuthService:
             audience=panel_audience,
             organization_id=user.organization_id
         )
-
-        # 5. Update last login
-        user.last_login_at = datetime.now(timezone.utc)
-        await db.commit()
 
         return user, session_token
 
@@ -100,6 +104,12 @@ class AuthService:
         if claimed.rowcount != 1:
             raise ConflictError("Invitation token has already been accepted")
 
+        if invitation.organization_id:
+            from pixl.modules.organizations.models import Organization
+            org = await db.get(Organization, invitation.organization_id)
+            if not org or org.status != "ACTIVE":
+                raise ForbiddenError("Organization is not active")
+
         # 2. Check if user already exists
         user_result = await db.execute(select(User).where(User.email == invitation.email.lower()))
         user = user_result.scalar_one_or_none()
@@ -107,6 +117,9 @@ class AuthService:
         hashed_pwd = await run_in_threadpool(hash_password, password)
 
         if user:
+            if (user.organization_id != invitation.organization_id or user.role != invitation.role
+                    or user.status == "DELETED"):
+                raise ConflictError("Invitation cannot change an existing account identity or restore deleted access")
             await run_in_threadpool(SessionManager.revoke_all_user_sessions, user.id)
             # Activate existing user
             user.hashed_password = hashed_pwd
@@ -116,6 +129,7 @@ class AuthService:
             if totp_secret:
                 user.totp_secret = totp_secret
                 user.is_mfa_enabled = True
+                user.last_totp_counter = None
         else:
             # Create new user with assigned role from invitation
             user = User(
@@ -131,6 +145,9 @@ class AuthService:
 
         # 3. Mark invitation as consumed atomically
         invitation.used_at = datetime.now(timezone.utc)
+
+        # Materialize the generated UUID before referring to it in the audit row.
+        await db.flush()
 
         # 4. Record audit event
         audit = AuditEvent(

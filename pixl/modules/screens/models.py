@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from typing import Optional, List
-from sqlalchemy import String, Integer, BigInteger, DateTime, ForeignKey, Text, PrimaryKeyConstraint
+from sqlalchemy import String, Integer, BigInteger, DateTime, ForeignKey, Text, PrimaryKeyConstraint, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from pixl.core.database import Base, UUIDPrimaryKeyMixin, TimestampMixin
@@ -46,6 +46,7 @@ class Screen(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
 class EnrollmentChallenge(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "enrollment_challenges"
+    __table_args__ = (Index("ix_enrollment_challenges_expiry", "status", "expires_at"),)
 
     pin: Mapped[str] = mapped_column(String(8), unique=True, nullable=False, index=True)
     hw_fingerprint: Mapped[str] = mapped_column(String(255), nullable=False)

@@ -22,6 +22,15 @@ class FinalizeUploadRequest(BaseModel):
     expected_sha256: Optional[str] = Field(default=None, pattern="^[a-fA-F0-9]{64}$")
 
 
+class ProcessingStatusResponse(BaseModel):
+    ticket_id: str
+    status: str
+    attempts: int
+    error: Optional[str] = None
+    media_id: Optional[str] = None
+    background: bool
+
+
 class MediaAssetResponse(BaseModel):
     id: str
     organization_id: str

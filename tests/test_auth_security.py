@@ -91,7 +91,7 @@ async def test_invitation_acceptance_lifecycle(client: AsyncClient, master_auth_
     # 2. Unregistered user attempts agency login before accepting invite -> 401
     pre_login = await client.post("/api/v1/auth/agency/login", json={
         "email": "admin@horizon.com",
-        "password": "AnyPassword"
+        "password": "AnyPassword123!"
     })
     assert pre_login.status_code == 401
 

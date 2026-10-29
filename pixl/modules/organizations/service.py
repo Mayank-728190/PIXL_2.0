@@ -94,6 +94,58 @@ class OrganizationService:
         return org
 
     @staticmethod
+    async def invite_admin(db: AsyncSession, org_id: str, email: str, actor_id: str) -> str:
+        org = await db.get(Organization, org_id)
+        if not org:
+            raise NotFoundError("Agency not found")
+        if org.status != "ACTIVE":
+            raise ConflictError("Only active agencies can receive admin invitations")
+        email = email.lower()
+        if await db.scalar(select(User.id).where(User.email == email)):
+            raise ConflictError("An account already uses this email; use a new administrator identity")
+        now = datetime.now(timezone.utc)
+        pending = await db.execute(select(UserInvitation).where(
+            UserInvitation.email == email, UserInvitation.used_at.is_(None),
+            UserInvitation.expires_at > now
+        ))
+        if pending.scalars().first():
+            raise ConflictError("An unexpired invitation already exists for this email")
+        token = generate_secure_token(32)
+        db.add(UserInvitation(organization_id=org_id, email=email, role="agency_admin",
+                              token=token, expires_at=now + timedelta(hours=24)))
+        db.add(AuditEvent(organization_id=org_id, user_id=actor_id,
+                          action="ADMIN_INVITED", resource_type="ORGANIZATION", resource_id=org_id,
+                          details="Master issued an administrator invitation"))
+        await db.commit()
+        return token
+
+    @staticmethod
+    async def delete_admin(db: AsyncSession, org_id: str, user_id: str, actor_id: str) -> None:
+        user = await db.get(User, user_id)
+        if not user or user.organization_id != org_id or user.role != "agency_admin":
+            raise NotFoundError("Agency administrator not found")
+        if user.status == "DELETED":
+            return
+        user.status = "DELETED"
+        # Expire outstanding invitations too, so they cannot restore this identity.
+        invitations = await db.execute(select(UserInvitation).where(
+            UserInvitation.organization_id == org_id,
+            UserInvitation.email == user.email,
+            UserInvitation.used_at.is_(None)
+        ))
+        for invitation in invitations.scalars():
+            invitation.expires_at = datetime.now(timezone.utc)
+        db.add(AuditEvent(
+            organization_id=org_id, user_id=actor_id,
+            action="ADMIN_ACCESS_DELETED", resource_type="USER", resource_id=user_id,
+            details="Admin access revoked; business records retained"
+        ))
+        # Persist the disabled status first: authorization rejects even if the
+        # session store is temporarily unavailable during revocation.
+        await db.commit()
+        await run_in_threadpool(SessionManager.revoke_all_user_sessions, user_id)
+
+    @staticmethod
     async def list_agencies(db: AsyncSession) -> List[Organization]:
         result = await db.execute(select(Organization).order_by(Organization.created_at.desc()))
         return list(result.scalars().all())

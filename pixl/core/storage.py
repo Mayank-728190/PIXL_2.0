@@ -6,6 +6,7 @@ External object storage is deliberately rejected until a provider is implemented
 import hashlib
 import hmac
 import json
+import os
 import subprocess
 import time
 from urllib.parse import urlencode
@@ -22,12 +23,29 @@ MIME_EXTENSIONS = {
 }
 
 
+def _comparison_path(path: Path) -> Path:
+    """Normalize Windows namespace spelling only after resolving symlinks.
+
+    Windows realpath may retain the extended prefix when a parent is created
+    concurrently. It must not make the same canonical directory look unrelated.
+    Keep the original resolved path for I/O (including long-path support).
+    """
+    value = str(path)
+    if os.name == "nt":
+        if value.startswith("\\\\?\\UNC\\"):
+            return Path("\\\\" + value[8:])
+        if value.startswith("\\\\?\\"):
+            return Path(value[4:])
+    return path
+
+
 def storage_path(key: str) -> Path:
     if settings.STORAGE_PROVIDER != "local":
         raise ConflictError("This installation supports local storage only")
     root = Path(settings.LOCAL_STORAGE_PATH).resolve()
     path = (root / key).resolve()
-    if not path.is_relative_to(root) or path == root:
+    comparison_root, comparison_path = _comparison_path(root), _comparison_path(path)
+    if not comparison_path.is_relative_to(comparison_root) or comparison_path == comparison_root:
         raise UnprocessableError("Invalid storage path")
     return path
 
@@ -43,7 +61,8 @@ def media_signature(key: str, expires: int) -> str:
 
 def valid_media_signature(key: str, expires: int, signature: str) -> bool:
     now = int(time.time())
-    return now <= expires <= now + 259260 and hmac.compare_digest(signature, media_signature(key, expires))
+    return (now <= expires <= now + 259260 and len(signature) == 64 and signature.isascii()
+            and hmac.compare_digest(signature, media_signature(key, expires)))
 
 
 def public_media_url(key: str, base_url: str | None = None) -> str:
