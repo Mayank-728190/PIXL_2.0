@@ -166,3 +166,4 @@ async def device_heartbeat_endpoint(
         latest_manifest_version=latest_ver,
         action_required=action
     )
+

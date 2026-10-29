@@ -31,6 +31,7 @@ from pixl.modules.campaigns.router import (
     device_manifest_router
 )
 from pixl.modules.ingestion.router import router as ingestion_router
+from pixl.modules.tv.router import tv_router, media_file_router
 
 
 @asynccontextmanager
@@ -80,6 +81,7 @@ async def pixl_exception_handler(request: Request, exc: PixlException):
 
 
 # Operational Healthcheck Endpoints
+@app.get("/health", tags=["Operational Observability"])
 @app.get("/healthz", tags=["Operational Observability"])
 @app.get("/api/v1/health/live", tags=["Operational Observability"])
 async def liveness_check():
@@ -105,3 +107,6 @@ app.include_router(playlists_router)
 app.include_router(agency_campaigns_router)
 app.include_router(device_manifest_router)
 app.include_router(ingestion_router)
+app.include_router(tv_router)
+app.include_router(media_file_router)
+

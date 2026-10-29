@@ -9,6 +9,7 @@ from pixl.core.database import Base, UUIDPrimaryKeyMixin, TimestampMixin
 class Campaign(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "campaigns"
 
+    campaign_number: Mapped[Optional[int]] = mapped_column(Integer, unique=True, index=True, nullable=True)
     organization_id: Mapped[str] = mapped_column(
         String(36),
         ForeignKey("organizations.id", ondelete="CASCADE"),
@@ -92,3 +93,4 @@ class CampaignVersion(Base, UUIDPrimaryKeyMixin):
     )
 
     campaign: Mapped["Campaign"] = relationship("Campaign", back_populates="versions")
+

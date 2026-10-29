@@ -113,3 +113,4 @@ class IngestionService:
         
         await db.commit()
         return current_cursor, dispositions
+

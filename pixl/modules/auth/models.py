@@ -59,3 +59,4 @@ class AuditEvent(Base, UUIDPrimaryKeyMixin):
         nullable=False,
         index=True
     )
+

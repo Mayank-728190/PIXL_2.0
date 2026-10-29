@@ -42,3 +42,4 @@ EXPOSE 8000
 
 # Default command: run FastAPI production server via Uvicorn
 CMD ["uvicorn", "pixl.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]
+

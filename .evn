@@ -2,3 +2,4 @@
 DATABASE_URL=sqlite+aiosqlite:///./pixl2_dev.db
 ENVIRONMENT=development
 SECRET_KEY=pixl_dev_secret_key_change_me_in_production_89432f8a1e2049b
+

@@ -81,3 +81,4 @@ async def get_authenticated_device(
         raise AuthenticationError("Invalid or revoked device token")
 
     return credential
+

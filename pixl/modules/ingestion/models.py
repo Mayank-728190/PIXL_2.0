@@ -49,3 +49,4 @@ class QuarantinedPoPEvent(Base, UUIDPrimaryKeyMixin):
         default=lambda: datetime.now(timezone.utc),
         nullable=False
     )
+

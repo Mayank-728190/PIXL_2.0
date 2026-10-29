@@ -27,7 +27,7 @@ class DeviceEnrollChallengeResponse(BaseModel):
 
 class AgencyScreenClaimRequest(BaseModel):
     pin: str = Field(..., min_length=6, max_length=8)
-    screen_id: str = Field(..., description="ID of screen pre-assigned by Master to this Agency")
+    screen_id: Optional[str] = Field(None, description="Optional ID of screen pre-assigned by Master to this Agency")
     name: Optional[str] = None
     site_id: Optional[str] = None
 
@@ -85,3 +85,4 @@ class ScreenResponse(BaseModel):
 
     class Config:
         from_attributes = True
+

@@ -26,3 +26,4 @@ def aggregate_hourly_pop():
     Periodic task: generates hourly aggregates from raw playback_events table.
     """
     return {"aggregated_count": 0}
+

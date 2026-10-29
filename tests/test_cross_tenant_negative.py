@@ -97,3 +97,4 @@ async def test_neg_auth_009_missing_tenant_context_fails_closed(client: AsyncCli
     resp = await client.get("/api/v1/agency/screens", headers=headers_orphan)
     assert resp.status_code == 403
     assert "Missing tenant context" in resp.json()["error"]["message"]
+

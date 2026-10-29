@@ -61,3 +61,4 @@ class UnprocessableError(PixlException):
             detail=detail,
             code="VALIDATION_FAILED",
         )
+

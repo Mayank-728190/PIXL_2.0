@@ -76,3 +76,4 @@ async def get_agency_media(
     """Get single media asset; returns 404 if belonging to another agency."""
     asset = await MediaService.get_media(db=db, organization_id=org_id, media_id=media_id)
     return MediaAssetResponse.model_validate(asset)
+

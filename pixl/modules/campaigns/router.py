@@ -55,3 +55,4 @@ async def get_device_manifest(
         screen_id=credential.screen_id
     )
     return ManifestResponse(**signed_manifest)
+

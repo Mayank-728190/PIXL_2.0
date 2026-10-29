@@ -63,23 +63,16 @@ class ScreenService:
         db: AsyncSession,
         agency_id: str,
         pin: str,
-        screen_id: str,
+        screen_id: Optional[str] = None,
         new_name: Optional[str] = None,
         site_id: Optional[str] = None
     ) -> Screen:
-        # 1. Fetch screen and ensure it is assigned to this Agency
-        screen_result = await db.execute(select(Screen).where(Screen.id == screen_id))
-        screen = screen_result.scalar_one_or_none()
-        if not screen:
-            raise NotFoundError("Assigned screen not found")
+        clean_pin = pin.strip().upper()
 
-        if screen.organization_id != agency_id:
-            raise ForbiddenError("Cannot claim a screen that is not assigned to your agency by Master")
-
-        # 2. Fetch challenge by PIN
+        # 1. Fetch challenge by PIN
         challenge_result = await db.execute(
             select(EnrollmentChallenge).where(
-                EnrollmentChallenge.pin == pin.upper(),
+                EnrollmentChallenge.pin == clean_pin,
                 EnrollmentChallenge.status == "PENDING"
             )
         )
@@ -92,12 +85,27 @@ class ScreenService:
             await db.commit()
             raise ConflictError("Pairing PIN has expired")
 
+        # 2. Determine target screen
+        target_screen_id = screen_id or challenge.screen_id
+        if not target_screen_id:
+            raise NotFoundError("No screen associated with this challenge")
+
+        screen_result = await db.execute(select(Screen).where(Screen.id == target_screen_id))
+        screen = screen_result.scalar_one_or_none()
+        if not screen:
+            raise NotFoundError("Assigned screen not found")
+
+        if screen.organization_id and screen.organization_id != agency_id:
+            raise ForbiddenError("Cannot claim a screen that is not assigned to your agency by Master")
+
         # 3. Bind challenge to screen and mark CLAIMED atomically
         challenge.status = "CLAIMED"
         challenge.screen_id = screen.id
         challenge.organization_id = agency_id
 
-        screen.status = "PAIRING"
+        screen.organization_id = agency_id
+        screen.status = "PAIRED"
+        screen.pairing_code = clean_pin
         if new_name:
             screen.name = new_name
         if site_id:

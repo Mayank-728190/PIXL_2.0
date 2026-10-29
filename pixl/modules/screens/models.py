@@ -9,6 +9,8 @@ from pixl.core.database import Base, UUIDPrimaryKeyMixin, TimestampMixin
 class Screen(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "screens"
 
+    screen_number: Mapped[Optional[int]] = mapped_column(Integer, unique=True, index=True, nullable=True)
+    pairing_code: Mapped[Optional[str]] = mapped_column(String(16), unique=True, index=True, nullable=True)
     organization_id: Mapped[Optional[str]] = mapped_column(
         String(36),
         ForeignKey("organizations.id", ondelete="CASCADE"),
@@ -95,3 +97,4 @@ class DeviceCursor(Base):
     )
 
     screen: Mapped["Screen"] = relationship("Screen", back_populates="cursor")
+

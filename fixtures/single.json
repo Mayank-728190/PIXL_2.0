@@ -1,0 +1,31 @@
+{
+  "isPaired": true,
+  "status": "ACTIVE",
+  "campaign": {
+    "id": 11,
+    "name": "Single Campaign",
+    "layoutType": "SINGLE",
+    "startDate": "2026-01-01T00:00:00Z",
+    "endDate": "2030-01-01T00:00:00Z",
+    "playlist": {
+      "id": 21,
+      "name": "Default Playlist",
+      "mediaItems": [
+        {
+          "id": 101,
+          "name": "banner.png",
+          "publicUrl": "http://127.0.0.1:8000/media/banner.png",
+          "type": "image",
+          "durationSeconds": 7
+        },
+        {
+          "id": 102,
+          "name": "promo.mp4",
+          "publicUrl": "http://127.0.0.1:8000/media/promo.mp4",
+          "type": "video",
+          "durationSeconds": 13
+        }
+      ]
+    }
+  }
+}

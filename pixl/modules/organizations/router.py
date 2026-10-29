@@ -113,3 +113,4 @@ async def list_agency_brands(
     """Agency views only its own registered brands."""
     result = await db.execute(select(Brand).where(Brand.organization_id == org_id))
     return [BrandResponse.model_validate(b) for b in result.scalars().all()]
+

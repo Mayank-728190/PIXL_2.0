@@ -33,3 +33,4 @@ class LoginResponse(BaseModel):
     audience: str
     session_token: str
     message: str = "Authenticated successfully"
+

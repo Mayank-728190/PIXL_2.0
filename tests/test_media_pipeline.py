@@ -77,3 +77,4 @@ async def test_media_quarantine_upload_pipeline(client: AsyncClient, master_auth
     # 6. NEGATIVE TEST: Agency B cannot read Agency A's media asset -> 404 Not Found
     rogue_read = await client.get(f"/api/v1/agency/media/{media_id}", headers=headers_b)
     assert rogue_read.status_code == 404
+

@@ -99,3 +99,4 @@ async def test_screen_enrollment_and_agency_claiming(client: AsyncClient, master
     assert len(screens) == 1
     assert screens[0]["id"] == screen_a_id
     assert screens[0]["status"] == "PLAYING"
+

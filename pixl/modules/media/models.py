@@ -9,6 +9,7 @@ from pixl.core.database import Base, UUIDPrimaryKeyMixin, TimestampMixin
 class MediaAsset(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "media_assets"
 
+    media_number: Mapped[Optional[int]] = mapped_column(Integer, unique=True, index=True, nullable=True)
     organization_id: Mapped[str] = mapped_column(
         String(36),
         ForeignKey("organizations.id", ondelete="CASCADE"),
@@ -54,3 +55,4 @@ class UploadTicket(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     presigned_url: Mapped[str] = mapped_column(String(1024), nullable=False)
     status: Mapped[str] = mapped_column(String(50), default="PENDING", nullable=False)  # PENDING, FINALIZED, EXPIRED
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+

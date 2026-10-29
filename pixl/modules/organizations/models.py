@@ -40,3 +40,4 @@ class Brand(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     status: Mapped[str] = mapped_column(String(50), default="ACTIVE", nullable=False)
 
     organization: Mapped["Organization"] = relationship("Organization", back_populates="brands")
+

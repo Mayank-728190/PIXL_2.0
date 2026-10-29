@@ -34,3 +34,4 @@ class PoPBatchResponse(BaseModel):
     epoch: int
     last_committed_sequence: int
     dispositions: List[PoPDisposition]
+

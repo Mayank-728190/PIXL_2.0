@@ -118,3 +118,4 @@ async def test_invitation_acceptance_lifecycle(client: AsyncClient, master_auth_
     })
     assert login_resp.status_code == 200
     assert login_resp.json()["user"]["role"] == "agency_admin"
+

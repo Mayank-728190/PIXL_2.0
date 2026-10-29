@@ -117,3 +117,4 @@ async def get_me(session: dict = Depends(get_current_session_data)):
         "organization_id": session.get("organization_id"),
         "expires_at": session.get("expires_at"),
     }
+

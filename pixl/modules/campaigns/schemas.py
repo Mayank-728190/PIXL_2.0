@@ -42,3 +42,4 @@ class CampaignResponse(BaseModel):
 class ManifestResponse(BaseModel):
     signature: str
     payload: Dict[str, Any]
+
