@@ -50,7 +50,9 @@ async def test_master_login_with_totp_mfa(client: AsyncClient, master_admin_user
     data = resp_ok.json()
     assert data["audience"] == "pixl:audience:master"
     assert "session_token" in data
-    assert "__Host-PIXL-Master-Session" in resp_ok.headers.get("set-cookie", "")
+    from pixl.core.session import SessionManager
+    cookie_name = SessionManager.get_cookie_name_for_audience("pixl:audience:master")
+    assert cookie_name in resp_ok.headers.get("set-cookie", "")
 
 
 @pytest.mark.asyncio

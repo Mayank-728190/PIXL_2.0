@@ -2,7 +2,8 @@ from datetime import datetime, timezone
 from typing import List, Dict, Any, Tuple
 import json
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, update, func
+from sqlalchemy.exc import DataError, IntegrityError
 
 from pixl.modules.ingestion.models import PlaybackEvent, QuarantinedPoPEvent
 from pixl.modules.screens.models import Screen, DeviceCursor
@@ -17,12 +18,17 @@ class IngestionService:
         req: PoPBatchRequest
     ) -> Tuple[int, List[PoPDisposition]]:
         # 1. Fetch screen and verify
-        screen_res = await db.execute(select(Screen).where(Screen.id == req.device_id))
+        screen_res = await db.execute(select(Screen).where(Screen.id == req.device_id).with_for_update())
         screen = screen_res.scalar_one_or_none()
         if not screen or not screen.organization_id:
             raise NotFoundError("Screen or screen organization not found")
 
-        # 2. Fetch or create device cursor for this epoch
+        active_epoch = await db.scalar(select(func.max(DeviceCursor.epoch)).where(
+            DeviceCursor.screen_id == req.device_id))
+        if req.epoch != active_epoch:
+            raise ConflictError("Receipt epoch does not match the active device epoch")
+
+        # 2. Fetch the active device cursor
         cursor_res = await db.execute(
             select(DeviceCursor).where(
                 DeviceCursor.screen_id == req.device_id,
@@ -31,13 +37,8 @@ class IngestionService:
         )
         cursor = cursor_res.scalar_one_or_none()
         if not cursor:
-            cursor = DeviceCursor(
-                screen_id=req.device_id,
-                epoch=req.epoch,
-                last_committed_sequence=0
-            )
-            db.add(cursor)
-            await db.flush()
+            raise ConflictError("Device cursor is not initialized")
+        original_cursor = cursor.last_committed_sequence
 
         # Sort batch by sequence
         sorted_batch = sorted(req.batch, key=lambda x: x.local_sequence)
@@ -87,18 +88,20 @@ class IngestionService:
                     failure_reason=event.failure_reason,
                     clock_quality=event.clock_quality
                 )
-                db.add(pop_record)
+                async with db.begin_nested():
+                    db.add(pop_record)
+                    await db.flush()
                 current_cursor = seq
                 dispositions.append(
                     PoPDisposition(local_sequence=seq, status="STORED")
                 )
-            except Exception as e:
+            except (DataError, IntegrityError) as e:
                 # Poison event handling: quarantine event so batch can advance
                 q_event = QuarantinedPoPEvent(
                     screen_id=req.device_id,
                     device_epoch=req.epoch,
                     local_sequence=seq,
-                    rejection_reason=str(e),
+                    rejection_reason=type(e).__name__,
                     raw_payload_json=json.dumps(event.model_dump(), default=str)
                 )
                 db.add(q_event)
@@ -108,8 +111,13 @@ class IngestionService:
                 )
 
         # 4. Advance cursor atomically
-        cursor.last_committed_sequence = current_cursor
-        cursor.updated_at = datetime.now(timezone.utc)
+        advanced = await db.execute(update(DeviceCursor).where(
+            DeviceCursor.screen_id == req.device_id, DeviceCursor.epoch == req.epoch,
+            DeviceCursor.last_committed_sequence == original_cursor,
+        ).values(last_committed_sequence=current_cursor, updated_at=datetime.now(timezone.utc)))
+        if advanced.rowcount != 1:
+            await db.rollback()
+            raise ConflictError("Concurrent receipt upload; retry this batch")
         
         await db.commit()
         return current_cursor, dispositions

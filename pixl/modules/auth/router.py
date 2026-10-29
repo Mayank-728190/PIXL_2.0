@@ -1,8 +1,10 @@
 from fastapi import APIRouter, Depends, Response, Request
+from starlette.concurrency import run_in_threadpool
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pixl.core.database import get_db_session
 from pixl.core.session import SessionManager
+from pixl.core.rate_limit import authentication_rate_limit
 from pixl.core.dependencies import get_current_session_data
 from pixl.modules.auth.schemas import LoginRequest, LoginResponse, InvitationAcceptRequest, UserResponse
 from pixl.modules.auth.service import AuthService
@@ -10,7 +12,7 @@ from pixl.modules.auth.service import AuthService
 router = APIRouter(prefix="/api/v1/auth", tags=["Authentication & Session"])
 
 
-@router.post("/master/login", response_model=LoginResponse)
+@router.post("/master/login", response_model=LoginResponse, dependencies=[Depends(authentication_rate_limit)])
 async def login_master(
     req: LoginRequest,
     response: Response,
@@ -33,7 +35,7 @@ async def login_master(
     )
 
 
-@router.post("/agency/login", response_model=LoginResponse)
+@router.post("/agency/login", response_model=LoginResponse, dependencies=[Depends(authentication_rate_limit)])
 async def login_agency(
     req: LoginRequest,
     response: Response,
@@ -56,7 +58,7 @@ async def login_agency(
     )
 
 
-@router.post("/brand/login", response_model=LoginResponse)
+@router.post("/brand/login", response_model=LoginResponse, dependencies=[Depends(authentication_rate_limit)])
 async def login_brand(
     req: LoginRequest,
     response: Response,
@@ -79,7 +81,7 @@ async def login_brand(
     )
 
 
-@router.post("/invitation/accept", response_model=UserResponse)
+@router.post("/invitation/accept", response_model=UserResponse, dependencies=[Depends(authentication_rate_limit)])
 async def accept_invitation(
     req: InvitationAcceptRequest,
     db: AsyncSession = Depends(get_db_session)
@@ -102,7 +104,7 @@ async def logout(
     """Revoke session and clear HttpOnly cookie."""
     token = session.get("session_token")
     if token:
-        SessionManager.revoke_session(token)
+        await run_in_threadpool(SessionManager.revoke_session, token)
     SessionManager.clear_session_cookie(response, session.get("audience", ""))
     return {"status": "SUCCESS", "message": "Logged out successfully"}
 

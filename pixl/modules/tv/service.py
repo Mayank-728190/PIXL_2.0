@@ -9,32 +9,27 @@ from pixl.modules.campaigns.models import Campaign, ScreenAssignment
 from pixl.modules.playlists.models import Playlist, PlaylistItem
 from pixl.modules.media.models import MediaAsset
 from pixl.modules.ingestion.models import PlaybackEvent
+from pixl.core.database import ensure_utc
+from pixl.core.storage import public_media_url
+from pixl.core.identifiers import next_number
 from pixl.core.security import generate_pin
-from pixl.core.exceptions import NotFoundError, ForbiddenError
+from pixl.core.exceptions import NotFoundError, ForbiddenError, ConflictError
 
 
 async def get_next_screen_number(db: AsyncSession) -> int:
-    res = await db.execute(select(func.max(Screen.screen_number)))
-    curr = res.scalar() or 1000
-    return curr + 1
+    return await next_number(db, Screen, "screen_number", 1000)
 
 
 async def get_next_campaign_number(db: AsyncSession) -> int:
-    res = await db.execute(select(func.max(Campaign.campaign_number)))
-    curr = res.scalar() or 2000
-    return curr + 1
+    return await next_number(db, Campaign, "campaign_number", 2000)
 
 
 async def get_next_playlist_number(db: AsyncSession) -> int:
-    res = await db.execute(select(func.max(Playlist.playlist_number)))
-    curr = res.scalar() or 3000
-    return curr + 1
+    return await next_number(db, Playlist, "playlist_number", 3000)
 
 
 async def get_next_media_number(db: AsyncSession) -> int:
-    res = await db.execute(select(func.max(MediaAsset.media_number)))
-    curr = res.scalar() or 5000
-    return curr + 1
+    return await next_number(db, MediaAsset, "media_number", 5000)
 
 
 class PixlTvService:
@@ -112,14 +107,16 @@ class PixlTvService:
             .where(
                 ScreenAssignment.screen_id == screen.id,
                 Campaign.status == "PUBLISHED",
+                Campaign.start_time <= now,
                 Campaign.end_time > now
             )
             .order_by(Campaign.priority.desc())
         )
         campaign = camp_res.scalars().first()
 
-        campaign_id = campaign.campaign_number if campaign and campaign.campaign_number else (2001 if campaign else None)
-        playlist_id = 3001 if campaign else None
+        campaign_id = campaign.campaign_number if campaign else None
+        playlist = await db.get(Playlist, campaign.playlist_id) if campaign and campaign.playlist_id else None
+        playlist_id = playlist.playlist_number if playlist else None
 
         return {
             "screenId": screen.screen_number,
@@ -169,6 +166,7 @@ class PixlTvService:
             .where(
                 ScreenAssignment.screen_id == screen.id,
                 Campaign.status == "PUBLISHED",
+                Campaign.start_time <= now,
                 Campaign.end_time > now
             )
             .order_by(Campaign.priority.desc())
@@ -185,7 +183,7 @@ class PixlTvService:
         # Fetch playlist with media items
         pl_res = await db.execute(
             select(Playlist)
-            .where(Playlist.id == campaign.playlist_id)
+            .where(Playlist.id == campaign.playlist_id, Playlist.organization_id == screen.organization_id)
             .options(selectinload(Playlist.items).selectinload(PlaylistItem.media))
         )
         playlist = pl_res.scalar_one_or_none()
@@ -200,13 +198,15 @@ class PixlTvService:
         media_items = []
         for idx, item in enumerate(playlist.items):
             media = item.media
-            if not media:
+            if not media or media.status != "READY" or media.organization_id != screen.organization_id:
                 continue
-            media_id = media.media_number or (5000 + idx + 1)
+            if media.media_number is None:
+                raise ConflictError("Missing numeric media ID; run database migrations")
+            media_id = media.media_number
             media_type = "video" if "video" in (media.mime_type or "") else "image"
             
             # Build public URL accessible by Android device
-            download_url = f"{base_url.rstrip('/')}/media/{media.storage_key}"
+            download_url = public_media_url(media.storage_key, base_url)
 
             duration_sec = max(1, item.configured_duration_ms // 1000)
 
@@ -218,8 +218,10 @@ class PixlTvService:
                 "durationSeconds": duration_sec
             })
 
-        campaign_id = campaign.campaign_number or 2001
-        playlist_id = playlist.playlist_number or 3001
+        if campaign.campaign_number is None or playlist.playlist_number is None:
+            raise ConflictError("Missing numeric campaign/playlist ID; run database migrations")
+        campaign_id = campaign.campaign_number
+        playlist_id = playlist.playlist_number
 
         return {
             "isPaired": True,
@@ -230,8 +232,8 @@ class PixlTvService:
                 "layoutType": "SINGLE",
                 "splitRows": 1,
                 "splitCols": 1,
-                "startAtMs": int(campaign.start_time.timestamp() * 1000),
-                "endAtMs": int(campaign.end_time.timestamp() * 1000),
+                "startAtMs": int(ensure_utc(campaign.start_time).timestamp() * 1000),
+                "endAtMs": int(ensure_utc(campaign.end_time).timestamp() * 1000),
                 "playlist": {
                     "id": playlist_id,
                     "name": playlist.name,
@@ -258,7 +260,7 @@ class PixlTvService:
             )
         )
         screen = res.scalar_one_or_none()
-        if screen:
+        if screen and screen.organization_id and screen.status != "UNPAIRED":
             screen.last_heartbeat_at = datetime.now(timezone.utc)
             screen.status = "PLAYING"
             await db.commit()
@@ -280,40 +282,54 @@ class PixlTvService:
         if not screen:
             return 0
 
+        import hashlib
+        import json
+        from pydantic import BaseModel, Field, ValidationError
+        from typing import Literal
+        from pixl.core.exceptions import UnprocessableError
+        from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+        class Receipt(BaseModel):
+            mediaId: int = Field(gt=0)
+            campaignId: int = Field(gt=0)
+            timestamp: int = Field(gt=0)
+            durationSeconds: int = Field(ge=1, le=86400)
+            status: Literal["COMPLETED", "INTERRUPTED", "DECODE_FAILED", "SKIPPED"] = "COMPLETED"
+
         saved = 0
-        now = datetime.now(timezone.utc)
-        for idx, entry in enumerate(logs):
+        for entry in logs:
             try:
-                media_id = str(entry.get("mediaId", "unknown"))
-                campaign_id = str(entry.get("campaignId", "unknown"))
-                duration_sec = int(entry.get("durationSeconds", 10))
-                status = str(entry.get("status", "COMPLETED"))
-
-                # Timestamp might be epoch ms or ISO string
-                ts = entry.get("timestamp")
-                if isinstance(ts, (int, float)):
-                    played_at = datetime.fromtimestamp(ts / 1000.0, tz=timezone.utc)
-                else:
-                    played_at = now
-
-                event = PlaybackEvent(
-                    screen_id=screen.id,
-                    device_epoch=1,
-                    local_sequence=saved + 1,
-                    started_at=played_at,
-                    completed_at=played_at + timedelta(seconds=duration_sec),
-                    organization_id=screen.organization_id or "unassigned",
-                    campaign_id=campaign_id,
-                    media_id=media_id,
-                    duration_ms=duration_sec * 1000,
-                    outcome=status,
-                    clock_quality="DEVICE_LOCAL"
-                )
-                db.add(event)
-                saved += 1
-            except Exception:
-                continue
-
+                receipt = Receipt.model_validate(entry)
+                played_at = datetime.fromtimestamp(receipt.timestamp / 1000, tz=timezone.utc)
+            except (ValidationError, ValueError, OverflowError, OSError) as exc:
+                raise UnprocessableError("Invalid playback receipt") from exc
+            campaign = await db.scalar(select(Campaign).join(ScreenAssignment).where(
+                Campaign.campaign_number == receipt.campaignId,
+                Campaign.organization_id == screen.organization_id,
+                ScreenAssignment.screen_id == screen.id,
+            ))
+            media = await db.scalar(select(MediaAsset).where(
+                MediaAsset.media_number == receipt.mediaId,
+                MediaAsset.organization_id == screen.organization_id,
+            ))
+            if not campaign or not media:
+                raise UnprocessableError("Receipt references unknown or unauthorized media/campaign")
+            item = await db.scalar(select(PlaylistItem).where(
+                PlaylistItem.playlist_id == campaign.playlist_id, PlaylistItem.media_id == media.id,
+            ).limit(1))
+            if not item:
+                raise UnprocessableError("Receipt media is not part of the campaign")
+            canonical = json.dumps(receipt.model_dump(), sort_keys=True).encode()
+            sequence = int.from_bytes(hashlib.sha256(canonical).digest()[:8], "big") & ((1 << 63) - 1)
+            insert = sqlite_insert if db.get_bind().dialect.name == "sqlite" else pg_insert
+            statement = insert(PlaybackEvent).values(
+                screen_id=screen.id, device_epoch=0, local_sequence=sequence,
+                started_at=played_at, completed_at=played_at + timedelta(seconds=receipt.durationSeconds),
+                organization_id=screen.organization_id, campaign_id=campaign.id, media_id=media.id,
+                media_sha256=media.sha256, duration_ms=receipt.durationSeconds * 1000,
+                outcome=receipt.status, clock_quality="DEVICE_LOCAL",
+            ).on_conflict_do_nothing().returning(PlaybackEvent.screen_id)
+            saved += int((await db.execute(statement)).scalar_one_or_none() is not None)
         await db.commit()
         return saved
-

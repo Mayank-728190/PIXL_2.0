@@ -57,7 +57,7 @@ class ConflictError(PixlException):
 class UnprocessableError(PixlException):
     def __init__(self, detail: str = "Unprocessable entity"):
         super().__init__(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=422,
             detail=detail,
             code="VALIDATION_FAILED",
         )

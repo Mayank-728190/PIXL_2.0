@@ -1,6 +1,6 @@
 from datetime import datetime
 from typing import Optional, Dict, Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 
 class MasterScreenCreateRequest(BaseModel):
@@ -9,6 +9,11 @@ class MasterScreenCreateRequest(BaseModel):
     site_id: Optional[str] = None
     orientation: str = Field(default="LANDSCAPE", pattern="^(LANDSCAPE|PORTRAIT)$")
     resolution: str = Field(default="1920x1080")
+
+
+class MasterScreenAssignRequest(BaseModel):
+    organization_id: str
+    site_id: Optional[str] = None
 
 
 class DeviceEnrollChallengeRequest(BaseModel):
@@ -71,6 +76,7 @@ class ScreenHeartbeatResponse(BaseModel):
 
 class ScreenResponse(BaseModel):
     id: str
+    screen_number: Optional[int] = None
     organization_id: Optional[str]
     site_id: Optional[str]
     name: str
@@ -79,6 +85,24 @@ class ScreenResponse(BaseModel):
     resolution: str
     current_manifest_version: int
     last_heartbeat_at: Optional[datetime]
+    last_sync_at: Optional[datetime] = None
+
+    @computed_field
+    @property
+    def last_seen_at(self) -> Optional[datetime]:
+        from pixl.core.database import ensure_utc
+        times = [ensure_utc(t) for t in (self.last_heartbeat_at, self.last_sync_at) if t]
+        return max(times) if times else None
+
+    @computed_field
+    @property
+    def is_online(self) -> bool:
+        from datetime import timezone
+        from pixl.core.config import settings
+        return self.last_seen_at is not None and (
+            datetime.now(timezone.utc) - self.last_seen_at
+        ).total_seconds() <= settings.DEVICE_OFFLINE_THRESHOLD_SECONDS
+
     app_version: Optional[str]
     os_version: Optional[str]
     created_at: datetime

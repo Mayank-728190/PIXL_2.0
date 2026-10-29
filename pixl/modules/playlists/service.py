@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
+from pixl.core.identifiers import next_number
 from pixl.modules.playlists.models import Playlist, PlaylistItem
 from pixl.modules.media.models import MediaAsset
 from pixl.modules.playlists.schemas import PlaylistItemCreate
@@ -20,6 +21,7 @@ class PlaylistService:
     ) -> Playlist:
         # 1. Create playlist
         playlist = Playlist(
+            playlist_number=await next_number(db, Playlist, "playlist_number", 3000),
             organization_id=organization_id,
             name=name,
             is_reusable=is_reusable
@@ -48,6 +50,8 @@ class PlaylistService:
                         f"Cross-tenant violation: Media '{item_data.media_id}' belongs to another agency"
                     )
 
+                if media.status != "READY":
+                    raise ConflictError("Only READY media can be added to playlists")
                 playlist_item = PlaylistItem(
                     playlist_id=playlist.id,
                     media_id=item_data.media_id,

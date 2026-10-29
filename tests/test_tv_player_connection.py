@@ -1,4 +1,5 @@
 import pytest
+from tests.media_helpers import uploaded_ticket
 from datetime import datetime, timezone, timedelta
 from httpx import AsyncClient
 
@@ -74,7 +75,7 @@ async def test_native_android_player_apk_end_to_end_flow(client: AsyncClient, ma
     assert assign_data["screenName"] == "Lobby Display Screen"
 
     # 7. Agency uploads media (image and video), creates playlist and publishes a campaign
-    ticket_img = (await client.post(
+    ticket_img = (await uploaded_ticket(client,
         "/api/v1/agency/media/upload-ticket",
         headers=headers_agency,
         json={"filename": "poster.png", "size_bytes": 500000, "declared_mime": "image/png"}
@@ -85,7 +86,7 @@ async def test_native_android_player_apk_end_to_end_flow(client: AsyncClient, ma
         json={"ticket_id": ticket_img["ticket_id"]}
     )).json()
 
-    ticket_vid = (await client.post(
+    ticket_vid = (await uploaded_ticket(client,
         "/api/v1/agency/media/upload-ticket",
         headers=headers_agency,
         json={"filename": "welcome_promo.mp4", "size_bytes": 10000000, "declared_mime": "video/mp4"}
@@ -182,6 +183,17 @@ async def test_native_android_player_apk_end_to_end_flow(client: AsyncClient, ma
             "status": "COMPLETED"
         }
     ]
-    pop_resp = await client.post(f"/api/tv/{screen_id}/proof-of-play", json=pop_receipts)
+    pop_resp = await client.post(f"/api/tv/{screen_id}/proof-of-play?pairingCode={pairing_code}", json=pop_receipts)
     assert pop_resp.status_code == 200
     assert pop_resp.json()["saved"] == 2
+    replay = await client.post(
+        f"/api/tv/{screen_id}/proof-of-play?pairingCode={pairing_code}", json=pop_receipts)
+    assert replay.status_code == 200
+    assert replay.json()["saved"] == 0
+    from sqlalchemy import select
+    from pixl.modules.ingestion.models import PlaybackEvent
+    from tests.conftest import TestingSessionLocal
+    async with TestingSessionLocal() as db:
+        events = (await db.execute(select(PlaybackEvent))).scalars().all()
+        assert len(events) == 2
+        assert {event.media_id for event in events} == {media_img["id"], media_vid["id"]}

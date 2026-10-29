@@ -385,7 +385,7 @@ SIMULATOR_HTML = """<!DOCTYPE html>
           timestamp: Date.now(),
           status: 'COMPLETED'
         }];
-        await fetch(`/api/tv/${state.screenId}/proof-of-play`, {
+        await fetch(`/api/tv/${state.screenId}/proof-of-play?pairingCode=${encodeURIComponent(state.pairingCode)}`,  {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(receipt)
@@ -435,3 +435,4 @@ async def screen_simulator_page():
 @simulator_router.get("/player", response_class=RedirectResponse)
 async def player_alias():
     return RedirectResponse(url="/simulator")
+

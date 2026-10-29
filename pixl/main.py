@@ -1,13 +1,17 @@
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request, status
+from fastapi import Depends, FastAPI, Request
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from pixl.core.config import settings
-from pixl.core.database import engine, Base
+from pixl.core.database import engine, Base, get_db_session
 from pixl.core.exceptions import PixlException
 
 # Import all models to ensure metadata registration
+import pixl.core.identifiers  # noqa
 import pixl.modules.auth.models  # noqa
 import pixl.modules.organizations.models  # noqa
 import pixl.modules.screens.models  # noqa
@@ -33,15 +37,25 @@ from pixl.modules.campaigns.router import (
 from pixl.modules.ingestion.router import router as ingestion_router
 from pixl.modules.tv.router import tv_router, media_file_router
 from pixl.modules.simulator.router import simulator_router
+from pixl.portals.router import router as portal_router
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Initialize database tables on startup (especially for sqlite dev/test)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    yield
-    await engine.dispose()
+    if settings.ENVIRONMENT == "production":
+        if settings.SESSION_BACKEND != "redis":
+            raise RuntimeError("Production requires SESSION_BACKEND=redis")
+        if settings.SECRET_KEY.startswith(("pixl_default_", "pixl_dev_")) or len(settings.SECRET_KEY) < 32:
+            raise RuntimeError("Production requires a strong SECRET_KEY")
+        from pixl.core.security import get_server_signing_keys
+        get_server_signing_keys()
+    else:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+    try:
+        yield
+    finally:
+        await engine.dispose()
 
 
 app = FastAPI(
@@ -91,8 +105,24 @@ async def liveness_check():
 
 
 @app.get("/api/v1/health/ready", tags=["Operational Observability"])
-async def readiness_check():
-    """Readiness probe: validates database connection pool."""
+async def readiness_check(db: AsyncSession = Depends(get_db_session)):
+    """Readiness probe: checks the database rather than just process liveness."""
+    try:
+        await db.execute(text("SELECT 1"))
+    except SQLAlchemyError:
+        await db.rollback()
+        return JSONResponse(
+            status_code=503,
+            content={"status": "NOT_READY", "database": "UNAVAILABLE"},
+        )
+    if settings.SESSION_BACKEND == "redis":
+        import redis
+        from starlette.concurrency import run_in_threadpool
+        from pixl.core.session_store import cache
+        try:
+            await run_in_threadpool(lambda: cache().ping())
+        except redis.RedisError:
+            return JSONResponse(status_code=503, content={"status": "NOT_READY", "sessions": "UNAVAILABLE"})
     return {"status": "READY", "database": "CONNECTED"}
 
 
@@ -111,4 +141,5 @@ app.include_router(ingestion_router)
 app.include_router(tv_router)
 app.include_router(media_file_router)
 app.include_router(simulator_router)
+app.include_router(portal_router)
 

@@ -2,6 +2,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Tuple
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from starlette.concurrency import run_in_threadpool
 
 from pixl.modules.organizations.models import Organization, Site, Brand
 from pixl.modules.auth.models import User, UserInvitation, AuditEvent
@@ -78,7 +79,7 @@ class OrganizationService:
         user_results = await db.execute(select(User).where(User.organization_id == org_id))
         users = user_results.scalars().all()
         for u in users:
-            SessionManager.revoke_all_user_sessions(u.id)
+            await run_in_threadpool(SessionManager.revoke_all_user_sessions, u.id)
 
         audit = AuditEvent(
             organization_id=org_id,

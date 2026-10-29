@@ -91,8 +91,8 @@ def is_redis_online(redis_url: str = "redis://localhost:6379/0") -> bool:
 
 
 def wait_for_api_ready(port: int = 8000, timeout_seconds: int = 20) -> bool:
-    """Polls the /health endpoint until FastAPI application reports UP."""
-    url = f"http://127.0.0.1:{port}/health"
+    """Poll database readiness, not just process liveness."""
+    url = f"http://127.0.0.1:{port}/api/v1/health/ready"
     start_time = time.time()
     while time.time() - start_time < timeout_seconds:
         try:
@@ -116,15 +116,13 @@ def main():
         port = settings.PORT
         redis_url = settings.REDIS_URL
     except Exception as e:
-        log("Config", f"Could not load pixl.core.config: {e}. Falling back to defaults.", "\033[1;33m")
-        host = "0.0.0.0"
-        port = 8000
-        redis_url = "redis://localhost:6379/0"
+        log("Config", "Invalid configuration; startup aborted.", "\033[1;31m")
+        raise SystemExit(1) from e
 
     local_ip = get_local_ip()
     processes = []
 
-    def shutdown(signum=None, frame=None):
+    def shutdown(signum=None, frame=None, exit_status=0):
         print_banner("SHUTTING DOWN ALL PIXL SERVICES")
         for p, name in processes:
             if p.poll() is None:
@@ -134,8 +132,9 @@ def main():
                     p.wait(timeout=4)
                 except subprocess.TimeoutExpired:
                     p.kill()
+                    p.wait()
         log("Exit", "All services stopped cleanly.", "\033[1;32m")
-        sys.exit(0)
+        sys.exit(exit_status)
 
     signal.signal(signal.SIGINT, shutdown)
     if hasattr(signal, "SIGTERM"):
@@ -145,7 +144,7 @@ def main():
 
     # 1. Start Celery Worker (if Redis is running)
     if is_redis_online(redis_url):
-        log("Celery", f"Redis detected at {redis_url}. Launching background worker...", "\033[1;34m")
+        log("Celery", "Redis is reachable. Launching background worker...", "\033[1;34m")
         celery_pool = ["-P", "solo"] if sys.platform.startswith("win") else []
         celery_cmd = [
             str(TARGET_PYTHON), "-m", "celery",
@@ -165,6 +164,7 @@ def main():
         "pixl.main:app",
         "--host", host,
         "--port", str(port),
+        "--no-access-log",
     ]
     p_uvicorn = subprocess.Popen(uvicorn_cmd, cwd=str(ROOT_DIR), env=os.environ.copy())
     processes.append((p_uvicorn, "FastAPI Backend"))
@@ -175,10 +175,16 @@ def main():
 
     if not is_ready:
         log("Error", "Server failed to respond to /health probe within 25 seconds.", "\033[1;31m")
-        shutdown()
-        return
+        shutdown(exit_status=1)
 
     # 4. Display Status Dashboard
+    try:
+        import pyotp
+        totp = pyotp.TOTP("JBSWY3DPEHPK3PXP")
+        current_mfa = totp.now()
+    except Exception:
+        current_mfa = "Check pyotp"
+
     print(f"\n\033[1;32m{'=' * 72}\033[0m")
     print(f"\033[1;32m  PIXL 2.0 CORE PLATFORM IS ONLINE AND READY\033[0m")
     print(f"\033[1;32m{'=' * 72}\033[0m")
@@ -187,6 +193,17 @@ def main():
     print(f"  \033[1m* Screen Simulator:\033[0m    http://localhost:{port}/simulator")
     print(f"  \033[1m* Health Probe:\033[0m        http://localhost:{port}/health")
     print(f"  \033[1m* Native TV URL (LAN):\033[0m http://{local_ip}:{port}")
+    print(f"\033[1;32m{'-' * 72}\033[0m")
+    print(f"  \033[1;36m[DEFAULT LOGIN CREDENTIALS]\033[0m")
+    print(f"  \033[1m1. Master Portal:\033[0m      http://localhost:{port}/master")
+    print(f"     Email:              master@pixl.io")
+    print(f"     Password:           MasterPassword123!")
+    print(f"     MFA / TOTP Code:    \033[1;33m{current_mfa}\033[0m (Secret: JBSWY3DPEHPK3PXP)")
+    print()
+    print(f"  \033[1m2. Agency Portal:\033[0m      http://localhost:{port}/agency")
+    print(f"     Email:              admin@demoagency.com")
+    print(f"     Password:           AgencyPassword123!")
+    print(f"     MFA Code:           (Leave empty)")
     print(f"\033[1;32m{'-' * 72}\033[0m")
     print(f"  \033[1m* Android APK:\033[0m         app/app-debug.apk")
     print(f"  \033[1m* Quick TV Setup:\033[0m      In app-debug.apk, set server to: http://{local_ip}:{port}")
@@ -200,7 +217,7 @@ def main():
                 exit_code = p.poll()
                 if exit_code is not None:
                     log("Alert", f"{name} exited unexpectedly with code {exit_code}.", "\033[1;31m")
-                    shutdown()
+                    shutdown(exit_status=exit_code or 1)
             time.sleep(1)
     except KeyboardInterrupt:
         shutdown()

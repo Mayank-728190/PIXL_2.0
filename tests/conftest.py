@@ -13,15 +13,20 @@ from pixl.modules.auth.models import User
 
 # In-memory SQLite for isolated, fast test execution
 import os
+import tempfile
+from pathlib import Path
 from sqlalchemy import text
+from sqlalchemy.pool import NullPool
 
-TEST_DB_FILE = "./test_pixl.db"
+_test_directory = tempfile.TemporaryDirectory(prefix="pixl-tests-")
+TEST_DB_FILE = (Path(_test_directory.name) / "test_pixl.db").as_posix()
 TEST_DATABASE_URL = f"sqlite+aiosqlite:///{TEST_DB_FILE}"
 
 test_engine = create_async_engine(
     TEST_DATABASE_URL,
     connect_args={"check_same_thread": False},
-    pool_pre_ping=True
+    pool_pre_ping=True,
+    poolclass=NullPool,
 )
 
 TestingSessionLocal = async_sessionmaker(
@@ -34,7 +39,12 @@ TestingSessionLocal = async_sessionmaker(
 
 
 @pytest_asyncio.fixture(autouse=True)
-async def setup_test_db():
+async def setup_test_db(tmp_path, monkeypatch):
+    from pixl.core.config import settings
+    monkeypatch.setattr(settings, "LOCAL_STORAGE_PATH", str(tmp_path / "storage"))
+    monkeypatch.setattr(settings, "ALLOW_LEGACY_TV", True)
+    from pixl.core.rate_limit import _attempts
+    _attempts.clear()
     async with test_engine.begin() as conn:
         await conn.execute(text("PRAGMA journal_mode=WAL;"))
         await conn.run_sync(Base.metadata.create_all)

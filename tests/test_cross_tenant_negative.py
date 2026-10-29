@@ -1,4 +1,5 @@
 import pytest
+from tests.media_helpers import uploaded_ticket
 from httpx import AsyncClient
 
 from pixl.core.session import SessionManager
@@ -53,7 +54,7 @@ async def test_neg_auth_003_and_004_cross_tenant_read_rejected(client: AsyncClie
     assert resp_screen.status_code == 404
 
     # Agency B uploads media
-    ticket_b = (await client.post(
+    ticket_b = (await uploaded_ticket(client,
         "/api/v1/agency/media/upload-ticket",
         headers=headers_b,
         json={"filename": "asset_b.mp4", "size_bytes": 1000, "declared_mime": "video/mp4"}

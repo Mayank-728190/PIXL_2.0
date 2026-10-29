@@ -1,5 +1,5 @@
 from typing import List, Optional
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pixl.core.database import get_db_session
@@ -36,6 +36,18 @@ async def request_upload_ticket(
     )
 
 
+@router.put("/uploads/{ticket_id}")
+async def upload_media_bytes(
+    ticket_id: str,
+    request: Request,
+    signature: str = Query(..., min_length=64, max_length=64),
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Upload raw bytes using a single-use, expiring signed ticket URL."""
+    await MediaService.receive_upload(db, ticket_id, signature, request)
+    return {"status": "UPLOADED"}
+
+
 @router.post("/finalize", response_model=MediaAssetResponse)
 async def finalize_media_upload(
     req: FinalizeUploadRequest,
@@ -43,7 +55,7 @@ async def finalize_media_upload(
     org_id: str = Depends(require_tenant_context),
     session: dict = Depends(require_role(["agency_admin", "agency_operator"], expected_audience="pixl:audience:agency"))
 ):
-    """Notify backend that direct quarantine upload is finished; transitions to READY."""
+    """Validate uploaded bytes, inspect media, generate a thumbnail and publish."""
     asset = await MediaService.finalize_upload(
         db=db,
         organization_id=org_id,

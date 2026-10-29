@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir --user -r requirements.txt
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
 # Final production stage
 FROM python:3.12-slim-bookworm as runner
@@ -24,8 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy installed Python packages from builder
-COPY --from=builder /root/.local /root/.local
-ENV PATH=/root/.local/bin:$PATH
+COPY --from=builder /install /usr/local
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
@@ -34,12 +33,12 @@ RUN groupadd -r pixl && useradd -r -g pixl -d /app -s /sbin/nologin pixl
 
 # Copy application source code
 COPY . /app
-RUN chown -R pixl:pixl /app
+RUN mkdir -p /app/local_storage && chown -R pixl:pixl /app
 
 USER pixl
 
 EXPOSE 8000
 
 # Default command: run FastAPI production server via Uvicorn
-CMD ["uvicorn", "pixl.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]
+CMD ["uvicorn", "pixl.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log", "--workers", "1"]
 

@@ -1,6 +1,7 @@
 import asyncio
 from datetime import datetime, timezone, timedelta
 import pytest
+from tests.media_helpers import uploaded_ticket
 from httpx import AsyncClient
 
 from pixl.core.session import SessionManager
@@ -84,7 +85,7 @@ async def test_full_platform_concurrent_simulation(client: AsyncClient, master_a
         agency_headers, screen_id, device_token, server_pubkey = setup
 
         # Upload Media
-        ticket = (await client.post(
+        ticket = (await uploaded_ticket(client,
             "/api/v1/agency/media/upload-ticket",
             headers=agency_headers,
             json={"filename": f"ad_{idx}.mp4", "size_bytes": 15000000, "declared_mime": "video/mp4"}

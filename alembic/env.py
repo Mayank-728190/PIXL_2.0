@@ -10,6 +10,7 @@ from pixl.core.config import settings
 from pixl.core.database import Base
 
 # Import all models for migration autogeneration
+import pixl.core.identifiers  # noqa
 import pixl.modules.auth.models  # noqa
 import pixl.modules.organizations.models  # noqa
 import pixl.modules.screens.models  # noqa

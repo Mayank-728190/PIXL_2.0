@@ -2,7 +2,9 @@
 
 ## Current state
 
-This repository contains planning documentation only. There is no application, migration suite, runnable test suite, or deployment configuration here. No feature is verified complete. Historical checked boxes and example status updates are not execution evidence.
+This repository now contains a FastAPI backend, Alembic migrations, automated tests, deployment configuration, a browser simulator, and a prebuilt Android APK. The specifications below are requirements, not evidence that every feature is implemented or accepted. See the [project README](../README.md) for setup and [review findings](PROJECT_REVIEW.md) for known limitations.
+
+Current implementation evidence: [delivery status](DELIVERY_STATUS.md).
 
 ## Reading order
 

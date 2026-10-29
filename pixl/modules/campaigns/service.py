@@ -10,9 +10,14 @@ from pixl.modules.campaigns.models import Campaign, ScreenAssignment, CampaignVe
 from pixl.modules.campaigns.schemas import CampaignCreateRequest
 from pixl.modules.playlists.models import Playlist, PlaylistItem
 from pixl.modules.media.models import MediaAsset
+from pixl.modules.organizations.models import Brand
+from pixl.core.tenancy import require_owned_reference
 from pixl.modules.screens.models import Screen
 from pixl.core.security import get_server_signing_keys, sign_manifest_payload
 from pixl.core.config import settings
+from pixl.core.identifiers import next_number
+from pixl.core.storage import public_media_url
+from pixl.core.database import ensure_utc
 from pixl.core.exceptions import NotFoundError, ForbiddenError, ConflictError
 
 
@@ -24,8 +29,14 @@ class CampaignService:
         req: CampaignCreateRequest
     ) -> Campaign:
         # 1. Validate times
-        if req.start_time >= req.end_time:
+        start_time = ensure_utc(req.start_time)
+        end_time = ensure_utc(req.end_time)
+        if start_time >= end_time:
             raise ConflictError("start_time must precede end_time")
+        if len(req.screen_ids) != len(set(req.screen_ids)):
+            raise ConflictError("Duplicate screen assignments are not allowed")
+
+        await require_owned_reference(db, Brand, req.brand_id, organization_id)
 
         # 2. Validate playlist ownership
         pl_res = await db.execute(
@@ -46,14 +57,15 @@ class CampaignService:
 
         # 4. Create Campaign
         campaign = Campaign(
+            campaign_number=await next_number(db, Campaign, "campaign_number", 2000),
             organization_id=organization_id,
             brand_id=req.brand_id,
             playlist_id=req.playlist_id,
             name=req.name,
             status="DRAFT",
             priority=req.priority,
-            start_time=req.start_time,
-            end_time=req.end_time,
+            start_time=start_time,
+            end_time=end_time,
             current_version=1
         )
         db.add(campaign)
@@ -91,6 +103,19 @@ class CampaignService:
         if not campaign:
             raise NotFoundError("Campaign not found")
 
+        if ensure_utc(campaign.end_time) <= datetime.now(timezone.utc):
+            raise ConflictError("Cannot publish an expired campaign")
+        playlist = await db.scalar(select(Playlist).where(
+            Playlist.id == campaign.playlist_id, Playlist.organization_id == organization_id
+        ).options(selectinload(Playlist.items).selectinload(PlaylistItem.media)))
+        if not playlist or not playlist.items or not campaign.assignments:
+            raise ConflictError("Publishing requires media and target screens")
+        if any(not item.media or item.media.status != "READY"
+               or item.media.organization_id != organization_id for item in playlist.items):
+            raise ConflictError("Publishing requires READY media owned by your agency")
+        for assignment in campaign.assignments:
+            await require_owned_reference(db, Screen, assignment.screen_id, organization_id)
+
         campaign.status = "PUBLISHED"
         campaign.current_version += 1
 
@@ -123,6 +148,7 @@ class CampaignService:
             .join(ScreenAssignment, ScreenAssignment.campaign_id == Campaign.id)
             .where(
                 ScreenAssignment.screen_id == screen_id,
+                Campaign.organization_id == screen.organization_id,
                 Campaign.status == "PUBLISHED",
                 Campaign.end_time > now
             )
@@ -139,7 +165,7 @@ class CampaignService:
                 continue
             pl_res = await db.execute(
                 select(Playlist)
-                .where(Playlist.id == camp.playlist_id)
+                .where(Playlist.id == camp.playlist_id, Playlist.organization_id == screen.organization_id)
                 .options(selectinload(Playlist.items).selectinload(PlaylistItem.media))
             )
             pl = pl_res.scalar_one_or_none()
@@ -149,13 +175,13 @@ class CampaignService:
             playlist_entries = []
             for item in pl.items:
                 media = item.media
-                if media and media.status == "READY":
+                if media and media.status == "READY" and media.organization_id == screen.organization_id:
                     assets_map[media.id] = {
                         "id": media.id,
                         "sha256": media.sha256,
                         "filename": media.filename,
                         "size_bytes": media.size_bytes,
-                        "download_url": f"{settings.R2_PUBLIC_URL_PREFIX}/{media.storage_key}"
+                        "download_url": public_media_url(media.storage_key)
                     }
                     playlist_entries.append({
                         "asset_id": media.id,
@@ -166,8 +192,8 @@ class CampaignService:
             schedule_items.append({
                 "campaign_id": camp.id,
                 "priority": camp.priority,
-                "start_time": camp.start_time.isoformat(),
-                "end_time": camp.end_time.isoformat(),
+                "start_time": ensure_utc(camp.start_time).isoformat(),
+                "end_time": ensure_utc(camp.end_time).isoformat(),
                 "playlist": playlist_entries
             })
 

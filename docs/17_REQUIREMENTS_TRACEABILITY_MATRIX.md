@@ -2,7 +2,7 @@
 
 ## Reading this matrix
 
-Each row maps one bullet from the supplied 11-section checklist, in order. The hierarchy sub-bullets are included in AUTH-04. IDs are stable; tests named below are planned and do not exist yet. All rows are **Specified**, not Implemented, Tested or Accepted. Proposed owner roles and delivery gates are in document 13; assign named owners/dates before implementation.
+Each row maps one bullet from the supplied 11-section checklist, in order. The hierarchy sub-bullets are included in AUTH-04. IDs are stable; test identifiers below remain planned acceptance identifiers, not a mapping to the current pytest files. These rows retain their original **Specified** status until requirement-level evidence is reviewed. Some backend behavior is now implemented and tested; see [delivery status](DELIVERY_STATUS.md). Proposed owner roles and delivery gates are in document 13; assign named owners/dates before implementation.
 
 References: [B = baseline](13_REQUIREMENTS_BASELINE_AND_DELIVERY_PLAN.md), [U = UI/live status](14_UI_UX_AND_LIVE_DASHBOARD_SPEC.md), [M = media/campaign](15_MEDIA_AND_CAMPAIGN_WORKFLOW_SPEC.md), [K = kiosk/reliability](16_ANDROID_KIOSK_AND_DEVICE_RELIABILITY_SPEC.md), [S = security prerequisites](18_SECURITY_AND_PROTOCOL_IMPLEMENTATION_PREREQUISITES.md), [T = test plan](12_TEST_ACCEPTANCE_PLAN.md), [C = communication](COMMUNICATION_AND_MEETING_DRAFTS.md).
 

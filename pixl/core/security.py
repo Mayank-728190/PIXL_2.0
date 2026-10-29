@@ -59,8 +59,16 @@ def verify_totp_code(secret: str, code: str) -> bool:
     """Verify a 6-digit TOTP MFA code."""
     if not secret or not code:
         return False
-    totp = pyotp.TOTP(secret)
-    return totp.verify(code, valid_window=1)
+    try:
+        totp = pyotp.TOTP(secret)
+        return totp.verify(code, valid_window=1)
+    except (ValueError, TypeError):
+        return False
+
+
+def hash_device_token(token: str) -> str:
+    """Domain-marked digest; random 256-bit tokens do not need a password KDF."""
+    return "sha256:" + hashlib.sha256(token.encode()).hexdigest()
 
 
 def sha256_checksum(data: bytes) -> str:
@@ -97,9 +105,20 @@ _SERVER_PRIV_KEY, _SERVER_PUB_KEY = generate_ed25519_keypair()
 def get_server_signing_keys() -> Tuple[str, str]:
     """Retrieve consistent private and public ED25519 signing keys."""
     from pixl.core.config import settings
-    priv = settings.MANIFEST_SIGNING_PRIVATE_KEY_B64 or _SERVER_PRIV_KEY
-    pub = settings.MANIFEST_SIGNING_PUBLIC_KEY_B64 or _SERVER_PUB_KEY
-    return priv, pub
+    priv = settings.MANIFEST_SIGNING_PRIVATE_KEY_B64
+    pub = settings.MANIFEST_SIGNING_PUBLIC_KEY_B64
+    if not priv:
+        if pub or settings.ENVIRONMENT == "production":
+            raise ValueError("A manifest signing private key is required")
+        return _SERVER_PRIV_KEY, _SERVER_PUB_KEY
+    private_key = ed25519.Ed25519PrivateKey.from_private_bytes(base64.b64decode(priv, validate=True))
+    derived_pub = base64.b64encode(private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )).decode("ascii")
+    if pub and pub != derived_pub:
+        raise ValueError("Manifest signing public key does not match the private key")
+    return priv, derived_pub
 
 
 def sign_manifest_payload(payload_dict: Dict[str, Any], private_key_b64: str) -> str:

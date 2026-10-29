@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Literal
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -15,10 +15,13 @@ class Settings(BaseSettings):
     DEBUG: bool = True
     PORT: int = 8000
     HOST: str = "0.0.0.0"
+    PORTAL_PANEL: Literal["all", "master", "agency", "none"] = "all"
 
     # Security
     SECRET_KEY: str = "pixl_default_insecure_secret_key_needs_override_32_bytes_min"
     SESSION_COOKIE_NAME: str = "__Host-PIXL-Session"
+    SESSION_BACKEND: Literal["memory", "redis"] = "memory"
+    ALLOW_LEGACY_TV: bool = False
     SESSION_COOKIE_SECURE: bool = False
     SESSION_MAX_AGE_SECONDS: int = 1209600  # 14 days
 
@@ -29,10 +32,10 @@ class Settings(BaseSettings):
 
     @property
     def allowed_cors_origins(self) -> List[str]:
-        return [
-            self.MASTER_ORIGIN,
-            self.AGENCY_ORIGIN,
-            self.ADVERTISER_ORIGIN,
+        configured = [self.MASTER_ORIGIN, self.AGENCY_ORIGIN, self.ADVERTISER_ORIGIN]
+        if self.ENVIRONMENT == "production":
+            return configured
+        return configured + [
             "http://localhost:3000",
             "http://127.0.0.1:3000",
             "http://localhost:5173",
@@ -53,7 +56,12 @@ class Settings(BaseSettings):
     MANIFEST_SIGNING_PUBLIC_KEY_B64: str = ""
 
     # Storage
-    STORAGE_PROVIDER: str = "local"  # "local" or "r2"
+    STORAGE_PROVIDER: str = "local"  # Only local is implemented; other values fail closed.
+    LOCAL_STORAGE_PATH: str = "local_storage"
+    MEDIA_PUBLIC_BASE_URL: str = ""  # Empty uses same-origin URLs.
+    MAX_UPLOAD_BYTES: int = 262144000
+    FFPROBE_BINARY: str = "ffprobe"
+    FFMPEG_BINARY: str = "ffmpeg"
     R2_ACCOUNT_ID: str = ""
     R2_ACCESS_KEY_ID: str = ""
     R2_SECRET_ACCESS_KEY: str = ""

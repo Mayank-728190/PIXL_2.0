@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from typing import Optional, Tuple
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
+from starlette.concurrency import run_in_threadpool
 
 from pixl.modules.auth.models import User, UserInvitation, AuditEvent
 from pixl.core.database import ensure_utc
@@ -23,27 +24,36 @@ class AuthService:
         result = await db.execute(select(User).where(User.email == email.lower()))
         user = result.scalar_one_or_none()
 
-        if not user or not verify_password(password, user.hashed_password):
+        if not user or not await run_in_threadpool(verify_password, password, user.hashed_password):
             raise AuthenticationError("Invalid email or password")
 
         # 2. Check user status
         if user.status != "ACTIVE":
             raise ForbiddenError(f"Account is {user.status.lower()}. Access denied.")
 
+        if user.organization_id:
+            from pixl.modules.organizations.models import Organization
+            org = await db.get(Organization, user.organization_id)
+            if not org or org.status != "ACTIVE":
+                raise ForbiddenError("Organization is not active")
+
         # 3. Audience and role validation
         if panel_audience == "pixl:audience:master":
             if user.role != "master_admin":
                 raise ForbiddenError("Only Master administrators may authenticate on the Master portal")
-            # Master requires MFA
-            if user.is_mfa_enabled and user.totp_secret:
-                if not totp_code or not verify_totp_code(user.totp_secret, totp_code):
-                    raise AuthenticationError("Valid TOTP 2FA code is required for Master login")
+            # Master authentication must fail closed if MFA is not configured.
+            if not user.is_mfa_enabled or not user.totp_secret:
+                raise AuthenticationError("TOTP MFA setup is required for Master login")
+            if not totp_code or not verify_totp_code(user.totp_secret, totp_code):
+                raise AuthenticationError("Valid TOTP 2FA code is required for Master login")
         elif panel_audience == "pixl:audience:agency":
             if user.role not in ["agency_admin", "agency_operator"]:
                 raise ForbiddenError("Access restricted to Agency members")
         elif panel_audience == "pixl:audience:brand":
             if user.role != "brand_advertiser":
                 raise ForbiddenError("Access restricted to Brand Advertisers")
+        else:
+            raise ForbiddenError("Unknown authentication audience")
 
         # Optional MFA check if enabled on user account
         if user.is_mfa_enabled and user.totp_secret and panel_audience != "pixl:audience:master":
@@ -51,7 +61,7 @@ class AuthService:
                 raise AuthenticationError("Valid TOTP 2FA code is required")
 
         # 4. Create isolated session
-        session_token = SessionManager.create_session(
+        session_token = await run_in_threadpool(SessionManager.create_session,
             user_id=user.id,
             role=user.role,
             audience=panel_audience,
@@ -72,7 +82,7 @@ class AuthService:
         totp_secret: Optional[str] = None
     ) -> User:
         # 1. Locate invitation
-        result = await db.execute(select(UserInvitation).where(UserInvitation.token == token))
+        result = await db.execute(select(UserInvitation).where(UserInvitation.token == token).with_for_update())
         invitation = result.scalar_one_or_none()
 
         if not invitation:
@@ -84,13 +94,20 @@ class AuthService:
         if datetime.now(timezone.utc) > ensure_utc(invitation.expires_at):
             raise ConflictError("Invitation token has expired")
 
+        claimed = await db.execute(update(UserInvitation).where(
+            UserInvitation.id == invitation.id, UserInvitation.used_at.is_(None)
+        ).values(used_at=datetime.now(timezone.utc)))
+        if claimed.rowcount != 1:
+            raise ConflictError("Invitation token has already been accepted")
+
         # 2. Check if user already exists
         user_result = await db.execute(select(User).where(User.email == invitation.email.lower()))
         user = user_result.scalar_one_or_none()
 
-        hashed_pwd = hash_password(password)
+        hashed_pwd = await run_in_threadpool(hash_password, password)
 
         if user:
+            await run_in_threadpool(SessionManager.revoke_all_user_sessions, user.id)
             # Activate existing user
             user.hashed_password = hashed_pwd
             user.status = "ACTIVE"

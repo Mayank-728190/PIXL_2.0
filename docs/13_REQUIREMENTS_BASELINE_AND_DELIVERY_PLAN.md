@@ -4,7 +4,7 @@
 
 Deliver a professional digital signage platform with separate Master and Agency portals, agency-scoped advertiser purchasing, streamlined media/campaign workflows, live fleet status, local offline playback and receipt synchronization, and supported Android kiosk operation.
 
-This is a documentation baseline, not a completion report. The repository contains no application code. All requirements are Specified, with implementation and verification pending. [Document 17](17_REQUIREMENTS_TRACEABILITY_MATRIX.md) maps every checklist bullet to acceptance criteria and a planned test. Test identifiers there name future tests, not existing files.
+This is a requirements baseline, not a completion report. The repository now contains backend code and automated tests; implementation remains partial. See [delivery status](DELIVERY_STATUS.md) for current evidence and outstanding work. [Document 17](17_REQUIREMENTS_TRACEABILITY_MATRIX.md) maps every checklist bullet to acceptance criteria and a planned test. Test identifiers there name future tests, not existing files.
 
 ## 2. Authoritative product decisions
 

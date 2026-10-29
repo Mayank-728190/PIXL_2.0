@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from pixl.core.database import get_db_session
+from pixl.core.config import settings
 from pixl.core.dependencies import require_role, require_tenant_context
 from pixl.modules.organizations.schemas import (
     AgencyCreateRequest, AgencyResponse, AgencyProvisionResponse,
@@ -33,7 +34,7 @@ async def provision_agency(
         max_screens=req.max_screens,
         creator_user_id=session.get("user_id")
     )
-    invitation_link = f"http://agency.pixl.local:3000/accept-invitation?token={token}"
+    invitation_link = settings.AGENCY_ORIGIN.rstrip("/") + f"/accept-invitation?token={token}"
     return AgencyProvisionResponse(
         agency=AgencyResponse.model_validate(org),
         invitation_token=token,

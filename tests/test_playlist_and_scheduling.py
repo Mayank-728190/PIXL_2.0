@@ -1,5 +1,6 @@
 from datetime import datetime, timezone, timedelta
 import pytest
+from tests.media_helpers import uploaded_ticket
 from httpx import AsyncClient
 
 from pixl.core.session import SessionManager
@@ -29,7 +30,7 @@ async def test_playlist_scheduling_and_manifest_signing(client: AsyncClient, mas
     headers_b = {"Cookie": f"__Host-PIXL-Agency-Session={token_b}"}
 
     # Upload Media for Agency A and Media for Agency B
-    ticket_a = await client.post(
+    ticket_a = await uploaded_ticket(client,
         "/api/v1/agency/media/upload-ticket",
         headers=headers_a,
         json={"filename": "clip_a.mp4", "size_bytes": 1000000, "declared_mime": "video/mp4"}
@@ -40,7 +41,7 @@ async def test_playlist_scheduling_and_manifest_signing(client: AsyncClient, mas
         json={"ticket_id": ticket_a.json()["ticket_id"]}
     )).json()
 
-    ticket_b = await client.post(
+    ticket_b = await uploaded_ticket(client,
         "/api/v1/agency/media/upload-ticket",
         headers=headers_b,
         json={"filename": "clip_b.mp4", "size_bytes": 1000000, "declared_mime": "video/mp4"}

@@ -1,113 +1,163 @@
-from datetime import datetime, timezone, timedelta
-from typing import Optional, List
+import asyncio
+import hmac
+import os
+import tempfile
+import shutil
 import uuid
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from datetime import datetime, timedelta, timezone
+from typing import List, Optional
 
-from pixl.modules.media.models import MediaAsset, UploadTicket
-from pixl.modules.organizations.models import Organization
-from pixl.core.database import ensure_utc
+from fastapi import Request
+from sqlalchemy import func, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from pixl.core.config import settings
-from pixl.core.security import generate_secure_token
-from pixl.core.exceptions import ConflictError, NotFoundError, ForbiddenError
+from pixl.core.identifiers import next_number
+from pixl.core.database import ensure_utc
+from pixl.core.exceptions import ConflictError, ForbiddenError, NotFoundError, UnprocessableError
+from pixl.core.storage import (
+    MIME_EXTENSIONS, generate_thumbnail, inspect_media, public_media_url,
+    storage_path, upload_signature,
+)
+from pixl.modules.media.models import MediaAsset, UploadTicket
+from pixl.modules.organizations.models import Brand, Organization
 
 
 class MediaService:
     @staticmethod
-    async def create_upload_ticket(
-        db: AsyncSession,
-        organization_id: str,
-        filename: str,
-        size_bytes: int,
-        declared_mime: str
-    ) -> UploadTicket:
-        # Check quota
-        org_result = await db.execute(select(Organization).where(Organization.id == organization_id))
-        org = org_result.scalar_one_or_none()
-        if not org:
-            raise NotFoundError("Organization not found")
-
-        # Generate unique storage key in quarantine
-        file_ext = filename.split(".")[-1] if "." in filename else "bin"
-        storage_key = f"quarantine/{organization_id}/{uuid.uuid4()}.{file_ext}"
-        
-        # Simulated pre-signed URL for direct upload
-        presigned_url = f"{settings.R2_PUBLIC_URL_PREFIX}/{storage_key}?token={generate_secure_token(16)}"
-        expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
-
+    async def create_upload_ticket(db: AsyncSession, organization_id: str, filename: str,
+                                   size_bytes: int, declared_mime: str) -> UploadTicket:
+        org = await db.scalar(select(Organization).where(
+            Organization.id == organization_id).with_for_update())
+        if not org or org.status != "ACTIVE":
+            raise NotFoundError("Active organization not found")
+        if declared_mime not in MIME_EXTENSIONS or not 0 < size_bytes <= settings.MAX_UPLOAD_BYTES:
+            raise UnprocessableError("Unsupported MIME type or upload size")
+        used = await db.scalar(select(func.coalesce(func.sum(MediaAsset.size_bytes), 0)).where(
+            MediaAsset.organization_id == organization_id))
+        reserved = await db.scalar(select(func.coalesce(func.sum(UploadTicket.size_bytes), 0)).where(
+            UploadTicket.organization_id == organization_id,
+            UploadTicket.status.in_(["PENDING", "UPLOADED", "PROCESSING", "UPLOADING"]),
+            UploadTicket.expires_at > datetime.now(timezone.utc)))
+        if used + reserved + size_bytes > org.storage_quota_bytes:
+            raise ConflictError("Organization storage quota exceeded")
+        ticket_id = str(uuid.uuid4())
+        key = f"quarantine/{organization_id}/{ticket_id}.{MIME_EXTENSIONS[declared_mime]}"
+        storage_path(key)  # Fail explicitly for unsupported storage providers.
         ticket = UploadTicket(
-            organization_id=organization_id,
-            filename=filename,
-            size_bytes=size_bytes,
-            declared_mime=declared_mime,
-            storage_key=storage_key,
-            presigned_url=presigned_url,
-            status="PENDING",
-            expires_at=expires_at
+            id=ticket_id, organization_id=organization_id, filename=filename,
+            size_bytes=size_bytes, declared_mime=declared_mime, storage_key=key,
+            presigned_url=f"/api/v1/agency/media/uploads/{ticket_id}?signature={upload_signature(ticket_id)}",
+            status="PENDING", expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
         )
         db.add(ticket)
         await db.commit()
         return ticket
 
     @staticmethod
-    async def finalize_upload(
-        db: AsyncSession,
-        organization_id: str,
-        ticket_id: str,
-        brand_id: Optional[str] = None,
-        expected_sha256: Optional[str] = None
-    ) -> MediaAsset:
-        result = await db.execute(
-            select(UploadTicket).where(
-                UploadTicket.id == ticket_id,
-                UploadTicket.organization_id == organization_id
-            )
-        )
-        ticket = result.scalar_one_or_none()
+    async def receive_upload(db: AsyncSession, ticket_id: str, signature: str, request: Request):
+        if not hmac.compare_digest(signature, upload_signature(ticket_id)):
+            raise ForbiddenError("Invalid upload signature")
+        ticket = await db.get(UploadTicket, ticket_id)
         if not ticket:
-            raise NotFoundError("Upload ticket not found or does not belong to your agency")
-
-        if ticket.status != "PENDING":
-            raise ConflictError(f"Upload ticket is already {ticket.status.lower()}")
-
-        if datetime.now(timezone.utc) > ensure_utc(ticket.expires_at):
-            ticket.status = "EXPIRED"
-            await db.commit()
+            raise NotFoundError("Upload ticket not found")
+        if ensure_utc(ticket.expires_at) <= datetime.now(timezone.utc):
             raise ConflictError("Upload ticket expired")
-
-        # Mock / simulate content verification (in production Celery worker runs ffprobe & sha256)
-        sha256 = expected_sha256 or f"mock_sha256_{generate_secure_token(16)}"
-        published_key = f"published/{organization_id}/{sha256}.{ticket.filename.split('.')[-1]}"
-        
-        is_video = "video" in ticket.declared_mime
-        duration_ms = 15000 if is_video else 0
-
-        asset = MediaAsset(
-            organization_id=organization_id,
-            brand_id=brand_id,
-            filename=ticket.filename,
-            storage_key=published_key,
-            sha256=sha256,
-            mime_type=ticket.declared_mime,
-            size_bytes=ticket.size_bytes,
-            duration_ms=duration_ms,
-            width=1920,
-            height=1080,
-            status="READY",
-            thumbnail_url=f"{settings.R2_PUBLIC_URL_PREFIX}/thumbnails/{sha256}.webp"
-        )
-        db.add(asset)
-        ticket.status = "FINALIZED"
-
+        claimed = await db.execute(update(UploadTicket).where(
+            UploadTicket.id == ticket_id, UploadTicket.status == "PENDING"
+        ).values(status="UPLOADING"))
+        if claimed.rowcount != 1:
+            raise ConflictError("Upload is already in progress or complete")
         await db.commit()
-        return asset
+        target = storage_path(ticket.storage_key)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(dir=target.parent, suffix=".part")
+        try:
+            size = 0
+            with os.fdopen(fd, "wb") as output:
+                async for chunk in request.stream():
+                    size += len(chunk)
+                    if size > ticket.size_bytes or size > settings.MAX_UPLOAD_BYTES:
+                        raise UnprocessableError("Upload exceeds declared size")
+                    output.write(chunk)
+            if size != ticket.size_bytes:
+                raise UnprocessableError("Uploaded size does not match the ticket")
+            os.replace(temp_name, target)
+            ticket.status = "UPLOADED"
+            await db.commit()
+        except BaseException:
+            await db.rollback()
+            await db.execute(update(UploadTicket).where(UploadTicket.id == ticket_id).values(status="PENDING"))
+            await db.commit()
+            raise
+        finally:
+            from pathlib import Path
+            Path(temp_name).unlink(missing_ok=True)
 
     @staticmethod
-    async def list_media(
-        db: AsyncSession,
-        organization_id: str,
-        brand_id: Optional[str] = None
-    ) -> List[MediaAsset]:
+    async def finalize_upload(db: AsyncSession, organization_id: str, ticket_id: str,
+                              brand_id: Optional[str] = None,
+                              expected_sha256: Optional[str] = None) -> MediaAsset:
+        ticket = await db.scalar(select(UploadTicket).where(
+            UploadTicket.id == ticket_id, UploadTicket.organization_id == organization_id))
+        if not ticket:
+            raise NotFoundError("Upload ticket not found in your agency")
+        if brand_id:
+            brand = await db.get(Brand, brand_id)
+            if not brand or brand.organization_id != organization_id:
+                raise ForbiddenError("Brand does not belong to your agency")
+        if ensure_utc(ticket.expires_at) <= datetime.now(timezone.utc):
+            raise ConflictError("Upload ticket expired")
+        claimed = await db.execute(update(UploadTicket).where(
+            UploadTicket.id == ticket_id, UploadTicket.status == "UPLOADED"
+        ).values(status="PROCESSING"))
+        if claimed.rowcount != 1:
+            raise ConflictError("Upload must be completed before finalizing, and cannot be finalized twice")
+        await db.commit()
+        source = storage_path(ticket.storage_key)
+        try:
+            if not source.is_file() or source.stat().st_size != ticket.size_bytes:
+                raise UnprocessableError("Uploaded content is missing or has changed")
+            metadata = await asyncio.to_thread(inspect_media, source, ticket.declared_mime)
+            if expected_sha256 and not hmac.compare_digest(expected_sha256.lower(), metadata["sha256"]):
+                raise UnprocessableError("SHA-256 checksum mismatch")
+            ext = MIME_EXTENSIONS[ticket.declared_mime]
+            # Ticket-specific names allow authorized reuse of identical bytes.
+            key = f"published/{organization_id}/{ticket.id}.{ext}"
+            thumb_key = f"published/{organization_id}/{ticket.id}.thumbnail.webp"
+            target = storage_path(key)
+            thumbnail = storage_path(thumb_key)
+            await asyncio.to_thread(generate_thumbnail, source, thumbnail, ticket.declared_mime)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary_target = target.with_suffix(target.suffix + ".part")
+            await asyncio.to_thread(shutil.copyfile, source, temporary_target)
+            await asyncio.to_thread(os.replace, temporary_target, target)
+            asset = MediaAsset(
+                media_number=await next_number(db, MediaAsset, "media_number", 5000),
+                organization_id=organization_id, brand_id=brand_id, filename=ticket.filename,
+                storage_key=key, mime_type=ticket.declared_mime, size_bytes=ticket.size_bytes,
+                status="READY", thumbnail_url=public_media_url(thumb_key), **metadata,
+            )
+            db.add(asset)
+            ticket.status = "FINALIZED"
+            await db.commit()
+            # Cleanup is best effort after commit; a filesystem cleanup failure
+            # must not turn a successfully published ticket back into UPLOADED.
+            try:
+                source.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return asset
+        except BaseException:
+            await db.rollback()
+            # A validation failure is retryable while the original bytes remain.
+            await db.execute(update(UploadTicket).where(UploadTicket.id == ticket_id).values(status="UPLOADED"))
+            await db.commit()
+            raise
+
+    @staticmethod
+    async def list_media(db: AsyncSession, organization_id: str,
+                         brand_id: Optional[str] = None) -> List[MediaAsset]:
         query = select(MediaAsset).where(MediaAsset.organization_id == organization_id)
         if brand_id:
             query = query.where(MediaAsset.brand_id == brand_id)
@@ -115,18 +165,9 @@ class MediaService:
         return list(result.scalars().all())
 
     @staticmethod
-    async def get_media(
-        db: AsyncSession,
-        organization_id: str,
-        media_id: str
-    ) -> MediaAsset:
-        result = await db.execute(
-            select(MediaAsset).where(
-                MediaAsset.id == media_id,
-                MediaAsset.organization_id == organization_id
-            )
-        )
-        asset = result.scalar_one_or_none()
+    async def get_media(db: AsyncSession, organization_id: str, media_id: str) -> MediaAsset:
+        asset = await db.scalar(select(MediaAsset).where(
+            MediaAsset.id == media_id, MediaAsset.organization_id == organization_id))
         if not asset:
             raise NotFoundError("Media asset not found in your agency library")
         return asset

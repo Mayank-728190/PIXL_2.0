@@ -4,10 +4,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from pixl.core.database import get_db_session
+from pixl.core.rate_limit import enrollment_rate_limit
 from pixl.core.dependencies import require_role, require_tenant_context, get_authenticated_device
 from pixl.core.exceptions import ForbiddenError, NotFoundError
 from pixl.modules.screens.schemas import (
-    MasterScreenCreateRequest, ScreenResponse,
+    MasterScreenCreateRequest, MasterScreenAssignRequest, ScreenResponse,
     DeviceEnrollChallengeRequest, DeviceEnrollChallengeResponse,
     AgencyScreenClaimRequest, AgencyScreenClaimResponse,
     DeviceEnrollExchangeRequest, DeviceEnrollExchangeResponse,
@@ -49,6 +50,17 @@ async def master_list_screens_endpoint(
     """Master views global fleet across all agencies."""
     result = await db.execute(select(Screen).order_by(Screen.created_at.desc()))
     return [ScreenResponse.model_validate(s) for s in result.scalars().all()]
+
+
+@master_screens_router.post("/{screen_id}/assign", response_model=ScreenResponse)
+async def master_assign_screen_endpoint(
+    screen_id: str,
+    req: MasterScreenAssignRequest,
+    db: AsyncSession = Depends(get_db_session),
+    session: dict = Depends(require_role(["master_admin"], expected_audience="pixl:audience:master")),
+):
+    screen = await ScreenService.assign_screen(db, screen_id, req.organization_id, req.site_id)
+    return ScreenResponse.model_validate(screen)
 
 
 @master_screens_router.post("/{screen_id}/play-ad", response_model=AdminPlayAdResponse)
@@ -126,7 +138,7 @@ async def agency_get_screen(
     return ScreenResponse.model_validate(screen)
 
 
-@agency_screens_router.post("/claim", response_model=AgencyScreenClaimResponse)
+@agency_screens_router.post("/claim", response_model=AgencyScreenClaimResponse, dependencies=[Depends(enrollment_rate_limit)])
 async def agency_claim_screen_endpoint(
     req: AgencyScreenClaimRequest,
     db: AsyncSession = Depends(get_db_session),
@@ -201,7 +213,7 @@ async def agency_stop_ad_endpoint(
 
 
 # Device Hardware endpoints
-@device_router.post("/enroll/challenge", response_model=DeviceEnrollChallengeResponse)
+@device_router.post("/enroll/challenge", response_model=DeviceEnrollChallengeResponse, dependencies=[Depends(enrollment_rate_limit)])
 async def device_request_challenge(
     req: DeviceEnrollChallengeRequest,
     db: AsyncSession = Depends(get_db_session)
@@ -221,7 +233,7 @@ async def device_request_challenge(
     )
 
 
-@device_router.post("/enroll/exchange", response_model=DeviceEnrollExchangeResponse)
+@device_router.post("/enroll/exchange", response_model=DeviceEnrollExchangeResponse, dependencies=[Depends(enrollment_rate_limit)])
 async def device_exchange_credentials(
     req: DeviceEnrollExchangeRequest,
     db: AsyncSession = Depends(get_db_session)

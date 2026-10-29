@@ -1,4 +1,5 @@
 import pytest
+from tests.media_helpers import uploaded_ticket
 from datetime import datetime, timezone, timedelta
 from httpx import AsyncClient
 
@@ -78,7 +79,7 @@ async def test_admin_instant_ad_playback_and_preemption_lifecycle(client: AsyncC
     assert sync_init.json()["campaign"] is None
 
     # 5. Agency uploads 2 ads: Nike Video Ad & Coke Image Ad
-    t_video = (await client.post(
+    t_video = (await uploaded_ticket(client,
         "/api/v1/agency/media/upload-ticket",
         headers=headers_agency,
         json={"filename": "nike_air_max.mp4", "size_bytes": 15000000, "declared_mime": "video/mp4"}
@@ -89,7 +90,7 @@ async def test_admin_instant_ad_playback_and_preemption_lifecycle(client: AsyncC
         json={"ticket_id": t_video["ticket_id"]}
     )).json()
 
-    t_image = (await client.post(
+    t_image = (await uploaded_ticket(client,
         "/api/v1/agency/media/upload-ticket",
         headers=headers_agency,
         json={"filename": "coca_cola_summer.jpg", "size_bytes": 800000, "declared_mime": "image/jpeg"}
@@ -132,7 +133,7 @@ async def test_admin_instant_ad_playback_and_preemption_lifecycle(client: AsyncC
 
     # 8. TV Player reports Proof-of-Play receipt for the Nike Ad
     now = datetime.now(timezone.utc)
-    pop_resp1 = await client.post(f"/api/tv/{screen_id}/proof-of-play", json=[
+    pop_resp1 = await client.post(f"/api/tv/{screen_id}/proof-of-play?pairingCode={pairing_code}", json=[
         {
             "mediaId": nike_media_id,
             "campaignId": str(camp1["id"]),
@@ -191,3 +192,4 @@ async def test_admin_instant_ad_playback_and_preemption_lifecycle(client: AsyncC
     assert sync_after_stop.status_code == 200
     # Because Nike campaign (priority 150) is still valid and not expired, it resumes!
     assert sync_after_stop.json()["campaign"]["name"] == "Nike Air Max Campaign"
+

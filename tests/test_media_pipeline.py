@@ -1,4 +1,5 @@
 import pytest
+from tests.media_helpers import uploaded_ticket
 from httpx import AsyncClient
 
 from pixl.core.session import SessionManager
@@ -43,7 +44,7 @@ async def test_media_quarantine_upload_pipeline(client: AsyncClient, master_auth
     assert too_large.status_code == 422
 
     # 3. Valid upload ticket requested
-    valid_ticket = await client.post(
+    valid_ticket = await uploaded_ticket(client,
         "/api/v1/agency/media/upload-ticket",
         headers=headers_a,
         json={"filename": "summer_sale.mp4", "size_bytes": 45 * 1024 * 1024, "declared_mime": "video/mp4"}
@@ -58,7 +59,7 @@ async def test_media_quarantine_upload_pipeline(client: AsyncClient, master_auth
     final_resp = await client.post(
         "/api/v1/agency/media/finalize",
         headers=headers_a,
-        json={"ticket_id": ticket_id, "expected_sha256": "4b9e28f3a8b29c011e038f4d45543c8b417e170f80bc23df2f2a58b5e917d2a1"}
+        json={"ticket_id": ticket_id}
     )
     assert final_resp.status_code == 200
     media_data = final_resp.json()

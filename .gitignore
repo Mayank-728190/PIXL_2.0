@@ -76,6 +76,8 @@ celerybeat.pid
 *.log
 *.sqlite3
 *.db
+*.db-shm
+*.db-wal
 local_storage/
 quarantine/
 published/

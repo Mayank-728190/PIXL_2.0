@@ -1,6 +1,6 @@
-import os
+from pathlib import Path as FilePath
 from typing import List, Dict, Any, Optional
-from fastapi import APIRouter, Depends, Request, Response, Query, Path
+from fastapi import APIRouter, Depends, Request, HTTPException, Query
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,7 +9,13 @@ from pixl.core.database import get_db_session
 from pixl.core.config import settings
 from pixl.modules.tv.service import PixlTvService
 
-tv_router = APIRouter(prefix="/api/tv", tags=["Native Android Player TV Protocol"])
+def require_legacy_tv():
+    if settings.ENVIRONMENT == "production" or not settings.ALLOW_LEGACY_TV:
+        raise HTTPException(410, "Legacy TV protocol is disabled; use authenticated /api/v1/device endpoints")
+
+
+tv_router = APIRouter(prefix="/api/tv", tags=["Native Android Player TV Protocol"],
+                      dependencies=[Depends(require_legacy_tv)])
 media_file_router = APIRouter(tags=["Media File Serving"])
 
 
@@ -78,34 +84,40 @@ async def ping_tv_device(
 async def upload_tv_proof_of_play(
     screenId: int,
     records: List[Dict[str, Any]],
+    pairingCode: str = Query(..., min_length=6, max_length=8),
     db: AsyncSession = Depends(get_db_session)
 ):
     """Native Android Player Proof-of-Play receipt batch upload."""
+    from sqlalchemy import select
+    from pixl.modules.screens.models import Screen
+    screen = await db.scalar(select(Screen).where(
+        Screen.screen_number == screenId, Screen.pairing_code == pairingCode.strip().upper(),
+        Screen.organization_id.is_not(None),
+    ))
+    if not screen:
+        raise HTTPException(401, "Invalid screen pairing credentials")
+    if not 1 <= len(records) <= 100:
+        raise HTTPException(422, "Receipt batch must contain 1 to 100 records")
     saved_count = await PixlTvService.record_proof_of_play(db=db, screen_number=screenId, logs=records)
     return {"saved": saved_count}
 
 
 # 6. Direct Static Media Serving for Android Player
 @media_file_router.get("/media/{file_path:path}")
-async def serve_media_file(file_path: str):
-    """
-    Serves media files to Android ExoPlayer / ImageView.
-    If physical file exists under local_storage, serves it directly.
-    Otherwise returns a valid sample media byte stream.
-    """
-    local_path = os.path.join("local_storage", file_path)
-    if os.path.exists(local_path) and os.path.isfile(local_path):
-        return FileResponse(local_path)
-
-    # 1x1 transparent/colored PNG fallback for image requests
-    if file_path.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
-        # Minimal valid 1x1 PNG bytes
-        png_1x1 = (
-            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15c4"
-            b"\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
-        )
-        return Response(content=png_1x1, media_type="image/png")
-
-    # Fallback response for video requests
-    return Response(content=b"", media_type="video/mp4")
-
+async def serve_media_file(file_path: str, expires: Optional[int] = None, signature: Optional[str] = None):
+    """Serve actual published content only; quarantine and missing files are private."""
+    from pixl.core.storage import storage_path, valid_media_signature
+    from pixl.core.exceptions import UnprocessableError
+    # Reject Windows separators as well as POSIX traversal before resolving.
+    if "\\" in file_path or not file_path.startswith("published/") or ".." in file_path.split("/"):
+        raise HTTPException(status_code=404, detail="Media file not found")
+    try:
+        local_path = storage_path(file_path)
+    except UnprocessableError:
+        raise HTTPException(status_code=404, detail="Media file not found")
+    if (not local_path.is_file() or expires is None or not signature
+            or not valid_media_signature(file_path, expires, signature)):
+        raise HTTPException(status_code=404, detail="Media file not found")
+    from pixl.core.storage import MIME_EXTENSIONS
+    mime = {ext: mime for mime, ext in MIME_EXTENSIONS.items()}.get(local_path.suffix.lstrip("."))
+    return FileResponse(local_path, media_type=mime, headers={"X-Content-Type-Options": "nosniff"})

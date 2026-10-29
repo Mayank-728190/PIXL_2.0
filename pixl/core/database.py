@@ -62,9 +62,10 @@ engine = create_async_engine(
     settings.DATABASE_URL,
     echo=settings.DEBUG and not settings.ENVIRONMENT == "production",
     future=True,
+    hide_parameters=True,
     connect_args=connect_args,
     pool_pre_ping=True,
-    **({} if is_sqlite else {"pool_size": settings.DATABASE_POOL_SIZE, "max_overflow": settings.DATABASE_MAX_OVERFLOW})
+    **({} if is_sqlite else {"pool_size": settings.DATABASE_POOL_SIZE, "max_overflow": settings.DATABASE_MAX_OVERFLOW, "pool_timeout": settings.DATABASE_TIMEOUT_SECONDS})
 )
 
 AsyncSessionFactory = async_sessionmaker(
