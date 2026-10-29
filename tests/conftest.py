@@ -1,0 +1,102 @@
+import pytest
+import pytest_asyncio
+from httpx import AsyncClient, ASGITransport
+from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
+from sqlalchemy.pool import StaticPool
+import pyotp
+
+from pixl.core.database import Base, get_db_session
+from pixl.core.security import hash_password
+from pixl.core.session import SessionManager
+from pixl.main import app
+from pixl.modules.auth.models import User
+
+# In-memory SQLite for isolated, fast test execution
+import os
+from sqlalchemy import text
+
+TEST_DB_FILE = "./test_pixl.db"
+TEST_DATABASE_URL = f"sqlite+aiosqlite:///{TEST_DB_FILE}"
+
+test_engine = create_async_engine(
+    TEST_DATABASE_URL,
+    connect_args={"check_same_thread": False},
+    pool_pre_ping=True
+)
+
+TestingSessionLocal = async_sessionmaker(
+    bind=test_engine,
+    class_=AsyncSession,
+    expire_on_commit=False,
+    autocommit=False,
+    autoflush=False
+)
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def setup_test_db():
+    async with test_engine.begin() as conn:
+        await conn.execute(text("PRAGMA journal_mode=WAL;"))
+        await conn.run_sync(Base.metadata.create_all)
+    yield
+    async with test_engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+    await test_engine.dispose()
+    if os.path.exists(TEST_DB_FILE):
+        try:
+            os.remove(TEST_DB_FILE)
+        except Exception:
+            pass
+
+
+async def override_get_db_session():
+    async with TestingSessionLocal() as session:
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+
+
+app.dependency_overrides[get_db_session] = override_get_db_session
+
+
+@pytest_asyncio.fixture
+async def client():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        yield ac
+
+
+@pytest_asyncio.fixture
+async def master_admin_user():
+    """Seeds a master administrator with TOTP MFA secret."""
+    totp_secret = "JBSWY3DPEHPK3PXP"  # Standard base32 test secret
+    user = User(
+        email="master@pixl.io",
+        hashed_password=hash_password("MasterPassword123!"),
+        role="master_admin",
+        status="ACTIVE",
+        totp_secret=totp_secret,
+        is_mfa_enabled=True,
+    )
+    async with TestingSessionLocal() as session:
+        session.add(user)
+        await session.commit()
+        await session.refresh(user)
+    return user, totp_secret
+
+
+@pytest_asyncio.fixture
+async def master_auth_headers(master_admin_user):
+    user, _ = master_admin_user
+    session_token = SessionManager.create_session(
+        user_id=user.id,
+        role="master_admin",
+        audience="pixl:audience:master"
+    )
+    return {
+        "Cookie": f"__Host-PIXL-Master-Session={session_token}",
+        "Authorization": f"Bearer {session_token}"
+    }
