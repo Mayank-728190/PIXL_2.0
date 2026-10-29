@@ -21,9 +21,15 @@ COLUMNS = (
 
 
 def upgrade():
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
     for table, column, column_type in COLUMNS:
-        op.add_column(table, sa.Column(column, column_type, nullable=True))
-        op.create_index(f"ix_{table}_{column}", table, [column], unique=True)
+        cols = [c["name"] for c in inspector.get_columns(table)]
+        if column not in cols:
+            op.add_column(table, sa.Column(column, column_type, nullable=True))
+        indices = [idx["name"] for idx in inspector.get_indexes(table)]
+        if f"ix_{table}_{column}" not in indices:
+            op.create_index(f"ix_{table}_{column}", table, [column], unique=True)
 
 
 def downgrade():

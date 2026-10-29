@@ -80,6 +80,27 @@ def ensure_environment():
     os.environ["PYTHONPATH"] = str(ROOT_DIR)
 
 
+def ensure_database():
+    """Applies pending Alembic migrations and bootstraps default accounts."""
+    log("Database", "Synchronizing schema (alembic upgrade head)...", "\033[1;34m")
+    try:
+        from alembic import command
+        from alembic.config import Config
+        alembic_cfg = Config(str(ROOT_DIR / "alembic.ini"))
+        alembic_cfg.set_main_option("script_location", str(ROOT_DIR / "alembic"))
+        command.upgrade(alembic_cfg, "head")
+        log("Database", "Database schema is synchronized.", "\033[1;32m")
+    except Exception as e:
+        log("Database", f"Schema migration warning: {e}", "\033[1;31m")
+
+    try:
+        seed_script = ROOT_DIR / "scripts" / "seed_users.py"
+        if seed_script.exists():
+            subprocess.run([str(TARGET_PYTHON), str(seed_script)], check=True, cwd=str(ROOT_DIR))
+    except Exception as e:
+        log("Database", f"Seed bootstrap error: {e}", "\033[1;31m")
+
+
 def is_redis_online(redis_url: str = "redis://localhost:6379/0") -> bool:
     """Checks whether local Redis instance is reachable."""
     try:
@@ -108,6 +129,7 @@ def wait_for_api_ready(port: int = 8000, timeout_seconds: int = 20) -> bool:
 
 def main():
     ensure_environment()
+    ensure_database()
 
     # Load configuration
     try:
