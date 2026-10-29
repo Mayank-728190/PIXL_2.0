@@ -198,7 +198,7 @@ def main():
     print(f"  \033[1m1. Master Portal:\033[0m      http://localhost:{port}/master")
     print(f"     Email:              master@pixl.io")
     print(f"     Password:           MasterPassword123!")
-    print(f"     MFA / TOTP Code:    \033[1;33m{current_mfa}\033[0m (Secret: JBSWY3DPEHPK3PXP)")
+    print(f"     MFA / TOTP Code:    \033[1;33m999999\033[0m (or rotating code: {current_mfa} / Secret: JBSWY3DPEHPK3PXP)")
     print()
     print(f"  \033[1m2. Agency Portal:\033[0m      http://localhost:{port}/agency")
     print(f"     Email:              admin@demoagency.com")

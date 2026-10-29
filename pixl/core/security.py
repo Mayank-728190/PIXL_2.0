@@ -61,6 +61,16 @@ def verify_totp_code(secret: str, code: str) -> bool:
         return False
     try:
         totp = pyotp.TOTP(secret)
+        totp.now()
+    except Exception:
+        return False
+
+    # In development mode (DEBUG=True), allow 999999 as a convenient static testing code
+    from pixl.core.config import settings
+    if settings.DEBUG and code == "999999":
+        return True
+
+    try:
         return totp.verify(code, valid_window=1)
     except (ValueError, TypeError):
         return False
